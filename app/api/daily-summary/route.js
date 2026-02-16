@@ -1,104 +1,102 @@
-import { NextResponse } from "next/server";
+export const runtime = "nodejs";
+
 import { createClient } from "@supabase/supabase-js";
-import { sendTelegramMessage } from "@/app/lib/telegram";
 
 // ==========================
-// Clients
+// Supabase client (SERVICE ROLE)
 // ==========================
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 // ==========================
-// Utils
+// Telegram helper
 // ==========================
-function getTomorrowDate() {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().split("T")[0]; // YYYY-MM-DD
+async function sendTelegram(chatId, text) {
+  await fetch(
+    `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "HTML",
+      }),
+    }
+  );
 }
 
 // ==========================
-// POST
+// POST – chamado pelo CRON
 // ==========================
 export async function POST() {
-  console.log("🚀 DAILY SUMMARY CHAMADO");
+  console.log("📊 Daily summary acionado");
 
-  const tomorrow = new Date().toISOString().split("T")[0];
-  console.log("📅 Data usada:", tomorrow);
+  try {
+    // 1️⃣ Buscar usuários com Telegram conectado
+    const { data: users, error: usersError } = await supabase
+      .from("users")
+      .select("email, telegram_chat_id")
+      .not("telegram_chat_id", "is", null);
 
-  const { data: stays, error } = await supabase
-    .from("stays")
-    .select("*")
-    .eq("date", tomorrow);
+    if (usersError) throw usersError;
+    if (!users || users.length === 0) {
+      console.log("ℹ️ Nenhum usuário com Telegram");
+      return Response.json({ ok: true });
+    }
 
-  console.log("📦 Stays encontrados:", stays);
+    // 2️⃣ Buscar pernoites futuros
+    const today = new Date().toISOString().split("T")[0];
 
-  if (!stays || stays.length === 0) {
-    return NextResponse.json({ ok: true, reason: "SEM STAYS" });
-  }
+    const { data: stays, error: staysError } = await supabase
+      .from("stays")
+      .select("city, date, user_email")
+      .gte("date", today)
+      .order("date", { ascending: true });
 
-  return NextResponse.json({ ok: true, stays });
-}
+    if (staysError) throw staysError;
 
-    // 2️⃣ Agrupar por cidade+data
-    const groups = {};
+    // 3️⃣ Agrupar por cidade + data
+    const grouped = {};
     for (const stay of stays) {
       const key = `${stay.city}-${stay.date}`;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(stay.user_email);
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(stay.user_email);
     }
 
-    // 3️⃣ Processar apenas onde há match (2+)
-    for (const key of Object.keys(groups)) {
-      const users = groups[key];
-      if (users.length < 2) continue;
+    // 4️⃣ Enviar resumo para cada usuário
+    for (const user of users) {
+      let message = "✈️ <b>Resumo diário de pernoites</b>\n\n";
+      let hasMatches = false;
 
-      const [city, date] = key.split("-");
+      for (const key in grouped) {
+        const [city, date] = key.split("-");
+        const emails = grouped[key];
 
-      // 4️⃣ Para cada usuário do grupo
-      for (const email of users) {
-        const others = users.filter(u => u !== email);
-        if (others.length === 0) continue;
-
-        // Buscar chat_id
-        const { data: user } = await supabase
-          .from("users")
-          .select("telegram_chat_id")
-          .eq("email", email)
-          .single();
-
-        if (!user?.telegram_chat_id) {
-          console.log(`⚠️ ${email} sem Telegram vinculado`);
-          continue;
+        if (emails.includes(user.email) && emails.length > 1) {
+          hasMatches = true;
+          message += `📍 <b>${city}</b> — ${date}\n`;
+          emails.forEach(e => {
+            message += `• ${e}\n`;
+          });
+          message += "\n";
         }
-
-        // Montar mensagem
-        const message = `
-✈️ *Crew Match – Amanhã*
-
-📍 *${city}* — ${date}
-👥 Você terá pernoite com:
-${others.map(o => `• ${o}`).join("\n")}
-        `;
-
-        // Enviar Telegram
-        await sendTelegramMessage(user.telegram_chat_id, message);
-        console.log(`📲 Notificação enviada para ${email}`);
       }
+
+      if (!hasMatches) {
+        message += "😴 Nenhum match de pernoite por enquanto.";
+      }
+
+      await sendTelegram(user.telegram_chat_id, message);
     }
 
-    return NextResponse.json({
-      ok: true,
-      message: "Resumo individual enviado com sucesso"
-    });
+    console.log("✅ Daily summary enviado com sucesso");
+    return Response.json({ ok: true });
 
   } catch (err) {
-    console.error("❌ Erro daily-summary:", err);
-    return NextResponse.json(
-      { ok: false, error: "Erro no resumo diário" },
-      { status: 500 }
-    );
+    console.error("❌ Erro daily summary:", err);
+    return Response.json({ ok: false }, { status: 500 });
   }
 }

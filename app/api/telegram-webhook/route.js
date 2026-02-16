@@ -1,28 +1,68 @@
-import { NextResponse } from "next/server";
-
-/**
- * FORÇA runtime Node (OBRIGATÓRIO no Vercel)
- */
 export const runtime = "nodejs";
 
-/**
- * POST
- */
-export async function POST() {
-  console.log("✅ daily-summary POST chamado");
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-  return NextResponse.json({
-    ok: true,
-    message: "Daily summary executado com sucesso",
-  });
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+export async function POST(req) {
+  try {
+    const body = await req.json();
+    console.log("📨 Telegram webhook recebido:", body);
+
+    if (!body.message || !body.message.text) {
+      return NextResponse.json({ ok: true });
+    }
+
+    const chatId = body.message.chat.id;
+    const text = body.message.text.trim();
+
+    if (!text.startsWith("/start")) {
+      return NextResponse.json({ ok: true });
+    }
+
+    const email = text.replace("/start", "").trim();
+
+    if (!email) {
+      await sendTelegram(chatId, "❌ Use:\n/start seu@email.com");
+      return NextResponse.json({ ok: true });
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .upsert(
+        { email, telegram_chat_id: chatId },
+        { onConflict: "email" }
+      );
+
+    if (error) {
+      console.error("❌ Erro Supabase:", error);
+      await sendTelegram(chatId, "❌ Erro ao salvar usuário.");
+      return NextResponse.json({ ok: true });
+    }
+
+    await sendTelegram(
+      chatId,
+      `✅ Telegram conectado com sucesso!\n📧 ${email}`
+    );
+
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error("❌ Erro webhook:", err);
+    return NextResponse.json({ ok: false }, { status: 500 });
+  }
 }
 
-/**
- * GET (apenas para teste no browser)
- */
-export async function GET() {
-  return NextResponse.json({
-    ok: true,
-    message: "Use POST para executar o daily summary",
+async function sendTelegram(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+    }),
   });
 }
