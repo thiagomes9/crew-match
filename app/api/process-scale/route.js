@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import { notifyMatches } from "@/app/lib/notifyMatches";
+import { notifyMatches } from "@/lib/notifyMatches";
+;
 
 export const runtime = "nodejs";
 
