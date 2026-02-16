@@ -20,11 +20,13 @@ export async function POST(req) {
       );
     }
 
+    const normalizedCity = city.toLowerCase();
+
     // 1️⃣ Salva o pernoite
     const { error: insertError } = await supabase
       .from("stays")
       .insert({
-        city: city.toLowerCase(),
+        city: normalizedCity,
         date,
         user_email,
       });
@@ -37,16 +39,17 @@ export async function POST(req) {
       );
     }
 
-    // 2️⃣ Dispara notificação individual (anti-spam fica no helper)
+    // 2️⃣ Notificação individual (usa O MESMO client)
     await notifyMatches({
-      city: city.toLowerCase(),
+      supabase,
+      city: normalizedCity,
       date,
       triggeringEmail: user_email,
     });
 
     return NextResponse.json({
       ok: true,
-      message: "Pernoite salvo e notificações processadas",
+      message: "Pernoite salvo e notificação processada",
     });
   } catch (err) {
     console.error("Erro save-stay:", err);
