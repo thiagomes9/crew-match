@@ -11,14 +11,16 @@ const supabase = createClient(
 export async function POST(req) {
   try {
     const body = await req.json();
-    console.log("📨 Telegram webhook recebido:", body);
+    console.log("📨 Telegram payload:", JSON.stringify(body));
 
     if (!body.message || !body.message.text) {
       return NextResponse.json({ ok: true });
     }
 
     const chatId = body.message.chat.id;
-    const text = body.message.text.trim();
+    const text = body.message.text;
+
+    console.log("✉️ Texto recebido:", text);
 
     if (!text.startsWith("/start")) {
       return NextResponse.json({ ok: true });
@@ -26,8 +28,8 @@ export async function POST(req) {
 
     const email = text.replace("/start", "").trim();
 
-    if (!email) {
-      await sendTelegram(chatId, "❌ Use:\n/start seu@email.com");
+    if (!email.includes("@")) {
+      await sendMessage(chatId, "❌ Use:\n/start seu@email.com");
       return NextResponse.json({ ok: true });
     }
 
@@ -40,11 +42,11 @@ export async function POST(req) {
 
     if (error) {
       console.error("❌ Erro Supabase:", error);
-      await sendTelegram(chatId, "❌ Erro ao salvar usuário.");
+      await sendMessage(chatId, "❌ Erro ao salvar usuário.");
       return NextResponse.json({ ok: true });
     }
 
-    await sendTelegram(
+    await sendMessage(
       chatId,
       `✅ Telegram conectado com sucesso!\n📧 ${email}`
     );
@@ -56,8 +58,10 @@ export async function POST(req) {
   }
 }
 
-async function sendTelegram(chatId, text) {
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+async function sendMessage(chatId, text) {
+  const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -65,4 +69,8 @@ async function sendTelegram(chatId, text) {
       text,
     }),
   });
+
+  const data = await res.json();
+  console.log("📤 Resposta Telegram:", data);
 }
+
