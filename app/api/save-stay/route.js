@@ -2,60 +2,56 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { notifyMatches } from "@/lib/notifyMatches";
 
-// 🔐 Cliente com SERVICE ROLE (backend only)
+export const runtime = "nodejs";
+
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 );
 
 export async function POST(req) {
   try {
-    const body = await req.json();
-    const { city, date, user_email } = body;
+    const { city, date, user_email } = await req.json();
 
-    // 1️⃣ Validação básica
     if (!city || !date || !user_email) {
       return NextResponse.json(
-        { error: "city, date e user_email são obrigatórios" },
+        { error: "Dados incompletos" },
         { status: 400 }
       );
     }
 
-    const normalizedCity = city.toLowerCase().trim();
-
-    // 2️⃣ Inserir pernoite
+    // 1️⃣ Salva o pernoite
     const { error: insertError } = await supabase
       .from("stays")
       .insert({
-        city: normalizedCity,
+        city: city.toLowerCase(),
         date,
         user_email,
       });
 
     if (insertError) {
-      // Evita erro se o mesmo usuário tentar inserir o mesmo pernoite
-      if (insertError.code === "23505") {
-        console.log("⚠️ Pernoite duplicado ignorado");
-      } else {
-        console.error("❌ Erro ao inserir pernoite:", insertError);
-        return NextResponse.json(
-          { error: "Erro ao salvar pernoite" },
-          { status: 500 }
-        );
-      }
+      console.error("Erro ao salvar stay:", insertError);
+      return NextResponse.json(
+        { error: "Erro ao salvar pernoite" },
+        { status: 500 }
+      );
     }
 
-    // 3️⃣ 🔔 Notificação em tempo real (com anti-spam)
-    await notifyMatches(normalizedCity, date);
+    // 2️⃣ Dispara notificação individual (anti-spam fica no helper)
+    await notifyMatches({
+      city: city.toLowerCase(),
+      date,
+      triggeringEmail: user_email,
+    });
 
     return NextResponse.json({
       ok: true,
-      message: "Pernoite salvo e matches verificados",
+      message: "Pernoite salvo e notificações processadas",
     });
   } catch (err) {
-    console.error("❌ Erro geral save-stay:", err);
+    console.error("Erro save-stay:", err);
     return NextResponse.json(
-      { error: "Erro interno do servidor" },
+      { error: "Erro interno" },
       { status: 500 }
     );
   }
