@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import pdfParse from "pdf-parse";
 import { notifyMatches } from "@/lib/notifyMatches";
-import { Buffer } from "buffer";
 
 export const runtime = "nodejs";
 
@@ -25,7 +25,7 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    console.log("API process-scale chamada");
+    console.log("📥 API process-scale chamada");
 
     const { filePath, user_email } = await req.json();
 
@@ -45,8 +45,8 @@ export async function POST(req) {
       .from("schedules")
       .download(filePath);
 
-    if (error || !file) {
-      console.error("Erro ao baixar PDF:", error);
+    if (error) {
+      console.error("❌ Erro ao baixar PDF:", error);
       return NextResponse.json(
         { error: "Erro ao baixar PDF" },
         { status: 500 }
@@ -54,25 +54,29 @@ export async function POST(req) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    console.log("PDF baixado do Storage");
+    console.log("📄 PDF baixado do Storage");
 
     /* =========================
-       2️⃣ Upload do PDF para OpenAI
+       2️⃣ Extrair TEXTO do PDF
     ========================= */
 
-    const uploadedFile = await openai.files.create({
-      file: buffer,
-      filename: "escala.pdf",
-      purpose: "assistants",
-    });
+    const parsed = await pdfParse(buffer);
+    const text = parsed.text;
 
-    console.log("Arquivo enviado para OpenAI:", uploadedFile.id);
+    if (!text || text.length < 50) {
+      return NextResponse.json(
+        { error: "Texto insuficiente no PDF" },
+        { status: 400 }
+      );
+    }
+
+    console.log("🧠 Texto extraído do PDF");
 
     /* =========================
-       3️⃣ Extração estruturada
+       3️⃣ Enviar TEXTO para IA
     ========================= */
 
-    const aiResponse = await openai.responses.create({
+    const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
         {
@@ -81,9 +85,10 @@ export async function POST(req) {
             {
               type: "input_text",
               text: `
-Extraia APENAS os pernoites do PDF.
+Você receberá o TEXTO de uma escala de voo.
 
-Formato EXATO (JSON puro):
+Extraia APENAS os PERNOITES no formato JSON:
+
 [
   { "city": "GRU", "date": "YYYY-MM-DD" }
 ]
@@ -91,31 +96,33 @@ Formato EXATO (JSON puro):
 Regras:
 - Cidade em IATA (3 letras)
 - Data ISO
-- Não escreva nada fora do JSON
-              `.trim(),
-            },
-            {
-              type: "input_file",
-              file_id: uploadedFile.id,
+- Não explique nada
+- Retorne SOMENTE JSON
+
+TEXTO DA ESCALA:
+"""
+${text}
+"""
+              `,
             },
           ],
         },
       ],
     });
 
-    const rawText =
-      aiResponse.output_text ||
-      aiResponse.output?.[0]?.content?.[0]?.text ||
+    const raw =
+      response.output_text ||
+      response.output?.[0]?.content?.[0]?.text ||
       "";
 
-    console.log("Resposta da IA:", rawText);
+    console.log("🤖 Resposta da IA:", raw);
 
     let stays;
     try {
-      stays = JSON.parse(rawText);
+      stays = JSON.parse(raw);
     } catch {
       return NextResponse.json(
-        { error: "IA retornou JSON inválido", rawText },
+        { error: "IA retornou JSON inválido", raw },
         { status: 500 }
       );
     }
@@ -128,59 +135,47 @@ Regras:
     }
 
     /* =========================
-       4️⃣ Deduplicar pernoites
+       4️⃣ Salvar pernoites
     ========================= */
 
-    const uniqueStays = Array.from(
-      new Map(
-        stays.map(s => [
-          `${s.city}-${s.date}`,
-          {
-            city: s.city.toUpperCase(),
-            date: s.date,
-            user_email,
-          }
-        ])
-      ).values()
-    );
-
-    /* =========================
-       5️⃣ Salvar no banco
-    ========================= */
+    const inserts = stays.map(s => ({
+      city: s.city.toUpperCase(),
+      date: s.date,
+      user_email,
+    }));
 
     const { error: insertError } = await supabase
       .from("stays")
-      .insert(uniqueStays);
+      .insert(inserts);
 
     if (insertError) {
-      console.error("Erro ao salvar pernoites:", insertError);
+      console.error("❌ Erro ao salvar stays:", insertError);
       return NextResponse.json(
         { error: "Erro ao salvar pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("Pernoites salvos");
+    console.log("💾 Pernoites salvos");
 
     /* =========================
-       6️⃣ Notificação individual
+       5️⃣ Notificar matches
     ========================= */
 
-    for (const stay of uniqueStays) {
-      await notifyMatches({
-        city: stay.city,
-        date: stay.date,
-        triggeringEmail: user_email,
-      });
-    }
+    await notifyMatches({
+      stays,
+      triggeringEmail: user_email,
+    });
+
+    console.log("📲 Notificações processadas");
 
     return NextResponse.json({
       ok: true,
-      pernoites: uniqueStays.length,
+      total: stays.length,
     });
 
   } catch (err) {
-    console.error("Erro process-scale:", err);
+    console.error("🔥 Erro geral process-scale:", err);
     return NextResponse.json(
       { error: "Erro interno process-scale" },
       { status: 500 }
