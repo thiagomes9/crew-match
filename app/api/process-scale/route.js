@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import { notifyMatches } from "@/lib/notifyMatches";
+import pdf from "pdf-parse";
 
 export const runtime = "nodejs";
 
 /* =========================
-   CLIENTES
+   CLIENTS
 ========================= */
 
 const openai = new OpenAI({
@@ -24,107 +25,99 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    console.log("API process-scale chamada");
+    console.log("📥 process-scale chamado");
 
     const { filePath, user_email } = await req.json();
 
     if (!filePath || !user_email) {
       return NextResponse.json(
-        { error: "filePath e user_email são obrigatórios" },
+        { error: "filePath e user_email obrigatórios" },
         { status: 400 }
       );
     }
 
     /* =========================
-       1️⃣ Baixar PDF do Supabase
+       1️⃣ Download PDF
     ========================= */
 
-    const { data: file, error: downloadError } = await supabase
+    const { data, error } = await supabase
       .storage
       .from("schedules")
       .download(filePath);
 
-    if (downloadError || !file) {
-      console.error("Erro download PDF:", downloadError);
+    if (error || !data) {
+      console.error("❌ Erro ao baixar PDF:", error);
       return NextResponse.json(
         { error: "Erro ao baixar PDF" },
         { status: 500 }
       );
     }
 
-    const fileBuffer = Buffer.from(await file.arrayBuffer());
-    console.log("PDF baixado do Storage");
+    const buffer = Buffer.from(await data.arrayBuffer());
+    console.log("✅ PDF baixado");
 
     /* =========================
-       2️⃣ Extrair TEXTO do PDF
-       (SOLUÇÃO DEFINITIVA p/ Vercel)
+       2️⃣ Extrair TEXTO (com limite)
     ========================= */
 
-    const pdfParse = (await import("pdf-parse")).default;
-    const parsed = await pdfParse(fileBuffer);
+    const parsed = await pdf(buffer);
 
-    const pdfText = (parsed?.text || "")
-  .slice(0, 12000); // LIMITE SEGURO (obrigatório)
+    const pdfText = (parsed.text || "")
+      .replace(/\s+/g, " ")
+      .slice(0, 12000); // 🔥 LIMITE ANTI-413
 
-
-    if (pdfText.length < 50) {
+    if (!pdfText) {
       return NextResponse.json(
-        { error: "Texto do PDF inválido ou vazio" },
+        { error: "PDF sem texto legível" },
         { status: 400 }
       );
     }
 
     /* =========================
-       3️⃣ Enviar TEXTO à OpenAI
-       (não o PDF → evita erro 413)
+       3️⃣ OpenAI
     ========================= */
 
-    const response = await openai.responses.create({
+    const aiResponse = await openai.responses.create({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: `
-Você receberá o texto de uma escala de voo.
+      input: `
+Extraia APENAS os pernoites da escala abaixo.
 
-Extraia APENAS os pernoites no formato JSON abaixo:
+Formato JSON estrito:
 
 [
   { "city": "GRU", "date": "YYYY-MM-DD" }
 ]
 
 Regras:
-- Cidade em IATA (3 letras)
-- Data em formato ISO
-- Não explique nada
-- Não escreva nada fora do JSON
+- IATA (3 letras)
+- Data ISO
+- Sem texto fora do JSON
 
-Texto da escala:
+ESCALA:
 ${pdfText}
-`,
-            },
-          ],
-        },
-      ],
+      `,
     });
 
-    const rawText =
-      response.output_text ||
-      response.output?.[0]?.content?.[0]?.text ||
-      "";
+    const text =
+      aiResponse.output_text ||
+      aiResponse.output?.[0]?.content?.find(c => c.type === "output_text")?.text;
 
-    console.log("Resposta IA:", rawText);
+    console.log("🤖 Resposta IA:", text);
+
+    if (!text) {
+      return NextResponse.json(
+        { error: "IA não retornou texto" },
+        { status: 500 }
+      );
+    }
 
     let stays;
     try {
-      stays = JSON.parse(rawText);
-    } catch (err) {
-      console.error("JSON inválido IA:", rawText);
+      stays = JSON.parse(text);
+    } catch (e) {
+      console.error("❌ JSON inválido:", text);
       return NextResponse.json(
-        { error: "IA retornou JSON inválido" },
+        { error: "IA retornou JSON inválido", raw: text },
         { status: 500 }
       );
     }
@@ -137,34 +130,40 @@ ${pdfText}
     }
 
     /* =========================
-       4️⃣ Salvar pernoites
+       4️⃣ Salvar no banco
     ========================= */
 
-    const inserts = stays.map((s) => ({
-      city: s.city.toUpperCase(),
+    const rows = stays.map(s => ({
+      city: s.city.toLowerCase(),
       date: s.date,
       user_email,
     }));
 
     const { error: insertError } = await supabase
       .from("stays")
-      .insert(inserts);
+      .insert(rows);
 
     if (insertError) {
-      console.error("Erro insert stays:", insertError);
+      console.error("❌ Erro DB:", insertError);
       return NextResponse.json(
         { error: "Erro ao salvar pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("Pernoites salvos com sucesso");
+    console.log("💾 Pernoites salvos");
 
     /* =========================
-       5️⃣ Notificar matches
+       5️⃣ Notificar (1 a 1)
     ========================= */
 
-    await notifyMatches(stays);
+    for (const stay of stays) {
+      await notifyMatches({
+        city: stay.city.toLowerCase(),
+        date: stay.date,
+        triggeringEmail: user_email,
+      });
+    }
 
     return NextResponse.json({
       ok: true,
@@ -172,9 +171,9 @@ ${pdfText}
     });
 
   } catch (err) {
-    console.error("Erro geral process-scale:", err);
+    console.error("🔥 Erro process-scale:", err);
     return NextResponse.json(
-      { error: "Erro interno process-scale" },
+      { error: "Erro ao processar escala com IA" },
       { status: 500 }
     );
   }
