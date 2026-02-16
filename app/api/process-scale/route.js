@@ -63,7 +63,9 @@ export async function POST(req) {
     const pdfParse = (await import("pdf-parse")).default;
     const parsed = await pdfParse(fileBuffer);
 
-    const pdfText = parsed?.text || "";
+    const pdfText = (parsed?.text || "")
+  .slice(0, 12000); // LIMITE SEGURO (obrigatório)
+
 
     if (pdfText.length < 50) {
       return NextResponse.json(
