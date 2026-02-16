@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import { notifyMatches } from "@/lib/notifyMatches";
-;
+import { Buffer } from "buffer";
 
 export const runtime = "nodejs";
 
@@ -27,8 +27,7 @@ export async function POST(req) {
   try {
     console.log("API process-scale chamada");
 
-    const body = await req.json();
-    const { filePath, user_email } = body;
+    const { filePath, user_email } = await req.json();
 
     if (!filePath || !user_email) {
       return NextResponse.json(
@@ -41,40 +40,39 @@ export async function POST(req) {
        1️⃣ Baixar PDF do Supabase
     ========================= */
 
-    const { data: file, error: downloadError } = await supabase
+    const { data: file, error } = await supabase
       .storage
       .from("schedules")
       .download(filePath);
 
-    if (downloadError) {
-      console.error(downloadError);
+    if (error || !file) {
+      console.error("Erro ao baixar PDF:", error);
       return NextResponse.json(
-        { error: "Erro ao baixar PDF do Storage" },
+        { error: "Erro ao baixar PDF" },
         { status: 500 }
       );
     }
 
-    const fileBuffer = Buffer.from(await file.arrayBuffer());
-    console.log("Arquivo baixado do Storage");
+    const buffer = Buffer.from(await file.arrayBuffer());
+    console.log("PDF baixado do Storage");
 
     /* =========================
-       2️⃣ Enviar PDF para OpenAI
+       2️⃣ Upload do PDF para OpenAI
     ========================= */
 
     const uploadedFile = await openai.files.create({
-      file: new File([fileBuffer], "escala.pdf", {
-        type: "application/pdf",
-      }),
+      file: buffer,
+      filename: "escala.pdf",
       purpose: "assistants",
     });
 
     console.log("Arquivo enviado para OpenAI:", uploadedFile.id);
 
     /* =========================
-       3️⃣ Pedir extração estruturada
+       3️⃣ Extração estruturada
     ========================= */
 
-    const response = await openai.responses.create({
+    const aiResponse = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
         {
@@ -83,20 +81,18 @@ export async function POST(req) {
             {
               type: "input_text",
               text: `
-Você receberá uma escala de voo em PDF.
+Extraia APENAS os pernoites do PDF.
 
-Extraia APENAS os pernoites no seguinte formato JSON:
-
+Formato EXATO (JSON puro):
 [
   { "city": "GRU", "date": "YYYY-MM-DD" }
 ]
 
 Regras:
-- Cidade sempre em IATA (3 letras)
-- Data no formato ISO
-- Não explique nada
-- Não escreva texto fora do JSON
-`,
+- Cidade em IATA (3 letras)
+- Data ISO
+- Não escreva nada fora do JSON
+              `.trim(),
             },
             {
               type: "input_file",
@@ -108,8 +104,8 @@ Regras:
     });
 
     const rawText =
-      response.output_text ||
-      response.output?.[0]?.content?.[0]?.text ||
+      aiResponse.output_text ||
+      aiResponse.output?.[0]?.content?.[0]?.text ||
       "";
 
     console.log("Resposta da IA:", rawText);
@@ -132,42 +128,59 @@ Regras:
     }
 
     /* =========================
-       4️⃣ Salvar pernoites
+       4️⃣ Deduplicar pernoites
     ========================= */
 
-    const inserts = stays.map((s) => ({
-      city: s.city.toUpperCase(),
-      date: s.date,
-      user_email,
-    }));
+    const uniqueStays = Array.from(
+      new Map(
+        stays.map(s => [
+          `${s.city}-${s.date}`,
+          {
+            city: s.city.toUpperCase(),
+            date: s.date,
+            user_email,
+          }
+        ])
+      ).values()
+    );
+
+    /* =========================
+       5️⃣ Salvar no banco
+    ========================= */
 
     const { error: insertError } = await supabase
       .from("stays")
-      .insert(inserts);
+      .insert(uniqueStays);
 
     if (insertError) {
-      console.error(insertError);
+      console.error("Erro ao salvar pernoites:", insertError);
       return NextResponse.json(
         { error: "Erro ao salvar pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("Pernoites salvos com sucesso");
+    console.log("Pernoites salvos");
 
     /* =========================
-       5️⃣ Notificar matches
+       6️⃣ Notificação individual
     ========================= */
 
-    await notifyMatches(stays);
+    for (const stay of uniqueStays) {
+      await notifyMatches({
+        city: stay.city,
+        date: stay.date,
+        triggeringEmail: user_email,
+      });
+    }
 
     return NextResponse.json({
       ok: true,
-      pernoites: stays.length,
+      pernoites: uniqueStays.length,
     });
 
   } catch (err) {
-    console.error("Erro geral process-scale:", err);
+    console.error("Erro process-scale:", err);
     return NextResponse.json(
       { error: "Erro interno process-scale" },
       { status: 500 }
