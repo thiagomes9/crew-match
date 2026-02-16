@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import pdfParse from "pdf-parse";
 import { notifyMatches } from "@/lib/notifyMatches";
 
 export const runtime = "nodejs";
@@ -25,7 +24,7 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    console.log("📥 API process-scale chamada");
+    console.log("API process-scale chamada");
 
     const { filePath, user_email } = await req.json();
 
@@ -40,40 +39,42 @@ export async function POST(req) {
        1️⃣ Baixar PDF do Supabase
     ========================= */
 
-    const { data: file, error } = await supabase
+    const { data: file, error: downloadError } = await supabase
       .storage
       .from("schedules")
       .download(filePath);
 
-    if (error) {
-      console.error("❌ Erro ao baixar PDF:", error);
+    if (downloadError || !file) {
+      console.error("Erro download PDF:", downloadError);
       return NextResponse.json(
         { error: "Erro ao baixar PDF" },
         { status: 500 }
       );
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    console.log("📄 PDF baixado do Storage");
+    const fileBuffer = Buffer.from(await file.arrayBuffer());
+    console.log("PDF baixado do Storage");
 
     /* =========================
        2️⃣ Extrair TEXTO do PDF
+       (SOLUÇÃO DEFINITIVA p/ Vercel)
     ========================= */
 
-    const parsed = await pdfParse(buffer);
-    const text = parsed.text;
+    const pdfParse = (await import("pdf-parse")).default;
+    const parsed = await pdfParse(fileBuffer);
 
-    if (!text || text.length < 50) {
+    const pdfText = parsed?.text || "";
+
+    if (pdfText.length < 50) {
       return NextResponse.json(
-        { error: "Texto insuficiente no PDF" },
+        { error: "Texto do PDF inválido ou vazio" },
         { status: 400 }
       );
     }
 
-    console.log("🧠 Texto extraído do PDF");
-
     /* =========================
-       3️⃣ Enviar TEXTO para IA
+       3️⃣ Enviar TEXTO à OpenAI
+       (não o PDF → evita erro 413)
     ========================= */
 
     const response = await openai.responses.create({
@@ -85,9 +86,9 @@ export async function POST(req) {
             {
               type: "input_text",
               text: `
-Você receberá o TEXTO de uma escala de voo.
+Você receberá o texto de uma escala de voo.
 
-Extraia APENAS os PERNOITES no formato JSON:
+Extraia APENAS os pernoites no formato JSON abaixo:
 
 [
   { "city": "GRU", "date": "YYYY-MM-DD" }
@@ -95,34 +96,33 @@ Extraia APENAS os PERNOITES no formato JSON:
 
 Regras:
 - Cidade em IATA (3 letras)
-- Data ISO
+- Data em formato ISO
 - Não explique nada
-- Retorne SOMENTE JSON
+- Não escreva nada fora do JSON
 
-TEXTO DA ESCALA:
-"""
-${text}
-"""
-              `,
+Texto da escala:
+${pdfText}
+`,
             },
           ],
         },
       ],
     });
 
-    const raw =
+    const rawText =
       response.output_text ||
       response.output?.[0]?.content?.[0]?.text ||
       "";
 
-    console.log("🤖 Resposta da IA:", raw);
+    console.log("Resposta IA:", rawText);
 
     let stays;
     try {
-      stays = JSON.parse(raw);
-    } catch {
+      stays = JSON.parse(rawText);
+    } catch (err) {
+      console.error("JSON inválido IA:", rawText);
       return NextResponse.json(
-        { error: "IA retornou JSON inválido", raw },
+        { error: "IA retornou JSON inválido" },
         { status: 500 }
       );
     }
@@ -138,7 +138,7 @@ ${text}
        4️⃣ Salvar pernoites
     ========================= */
 
-    const inserts = stays.map(s => ({
+    const inserts = stays.map((s) => ({
       city: s.city.toUpperCase(),
       date: s.date,
       user_email,
@@ -149,33 +149,28 @@ ${text}
       .insert(inserts);
 
     if (insertError) {
-      console.error("❌ Erro ao salvar stays:", insertError);
+      console.error("Erro insert stays:", insertError);
       return NextResponse.json(
         { error: "Erro ao salvar pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("💾 Pernoites salvos");
+    console.log("Pernoites salvos com sucesso");
 
     /* =========================
        5️⃣ Notificar matches
     ========================= */
 
-    await notifyMatches({
-      stays,
-      triggeringEmail: user_email,
-    });
-
-    console.log("📲 Notificações processadas");
+    await notifyMatches(stays);
 
     return NextResponse.json({
       ok: true,
-      total: stays.length,
+      pernoites: stays.length,
     });
 
   } catch (err) {
-    console.error("🔥 Erro geral process-scale:", err);
+    console.error("Erro geral process-scale:", err);
     return NextResponse.json(
       { error: "Erro interno process-scale" },
       { status: 500 }
