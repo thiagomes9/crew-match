@@ -2,12 +2,11 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import { notifyMatches } from "@/lib/notifyMatches";
-import pdf from "pdf-parse";
 
 export const runtime = "nodejs";
 
 /* =========================
-   CLIENTS
+   CLIENTES
 ========================= */
 
 const openai = new OpenAI({
@@ -25,19 +24,19 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    console.log("📥 process-scale chamado");
+    console.log("📥 API process-scale chamada");
 
     const { filePath, user_email } = await req.json();
 
     if (!filePath || !user_email) {
       return NextResponse.json(
-        { error: "filePath e user_email obrigatórios" },
+        { error: "filePath e user_email são obrigatórios" },
         { status: 400 }
       );
     }
 
     /* =========================
-       1️⃣ Download PDF
+       1️⃣ Download PDF do Supabase
     ========================= */
 
     const { data, error } = await supabase
@@ -57,30 +56,32 @@ export async function POST(req) {
     console.log("✅ PDF baixado");
 
     /* =========================
-       2️⃣ Extrair TEXTO (com limite)
+       2️⃣ Upload PDF para OpenAI
     ========================= */
 
-    const parsed = await pdf(buffer);
+    const uploadedFile = await openai.files.create({
+      file: new File([buffer], "escala.pdf", {
+        type: "application/pdf",
+      }),
+      purpose: "assistants",
+    });
 
-    const pdfText = (parsed.text || "")
-      .replace(/\s+/g, " ")
-      .slice(0, 12000); // 🔥 LIMITE ANTI-413
-
-    if (!pdfText) {
-      return NextResponse.json(
-        { error: "PDF sem texto legível" },
-        { status: 400 }
-      );
-    }
+    console.log("📤 PDF enviado para OpenAI:", uploadedFile.id);
 
     /* =========================
-       3️⃣ OpenAI
+       3️⃣ Extração via IA
     ========================= */
 
-    const aiResponse = await openai.responses.create({
+    const response = await openai.responses.create({
       model: "gpt-4.1-mini",
-      input: `
-Extraia APENAS os pernoites da escala abaixo.
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: `
+Extraia APENAS os pernoites da escala em PDF.
 
 Formato JSON estrito:
 
@@ -89,18 +90,23 @@ Formato JSON estrito:
 ]
 
 Regras:
-- IATA (3 letras)
+- Cidade em IATA (3 letras)
 - Data ISO
-- Sem texto fora do JSON
-
-ESCALA:
-${pdfText}
-      `,
+- Nenhum texto fora do JSON
+              `,
+            },
+            {
+              type: "input_file",
+              file_id: uploadedFile.id,
+            },
+          ],
+        },
+      ],
     });
 
     const text =
-      aiResponse.output_text ||
-      aiResponse.output?.[0]?.content?.find(c => c.type === "output_text")?.text;
+      response.output_text ||
+      response.output?.[0]?.content?.find(c => c.type === "output_text")?.text;
 
     console.log("🤖 Resposta IA:", text);
 
@@ -114,10 +120,9 @@ ${pdfText}
     let stays;
     try {
       stays = JSON.parse(text);
-    } catch (e) {
-      console.error("❌ JSON inválido:", text);
+    } catch {
       return NextResponse.json(
-        { error: "IA retornou JSON inválido", raw: text },
+        { error: "JSON inválido retornado pela IA", raw: text },
         { status: 500 }
       );
     }
@@ -130,7 +135,7 @@ ${pdfText}
     }
 
     /* =========================
-       4️⃣ Salvar no banco
+       4️⃣ Salvar pernoites
     ========================= */
 
     const rows = stays.map(s => ({
@@ -154,7 +159,7 @@ ${pdfText}
     console.log("💾 Pernoites salvos");
 
     /* =========================
-       5️⃣ Notificar (1 a 1)
+       5️⃣ Notificações
     ========================= */
 
     for (const stay of stays) {
