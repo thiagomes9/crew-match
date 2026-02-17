@@ -24,7 +24,7 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    console.log("📥 API process-scale chamada");
+    console.log("API process-scale chamada");
 
     const { filePath, user_email } = await req.json();
 
@@ -36,27 +36,27 @@ export async function POST(req) {
     }
 
     /* =========================
-       1️⃣ Download PDF do Supabase
+       1️⃣ Baixar PDF do Storage
     ========================= */
 
-    const { data, error } = await supabase
+    const { data: file, error: downloadError } = await supabase
       .storage
       .from("schedules")
       .download(filePath);
 
-    if (error || !data) {
-      console.error("❌ Erro ao baixar PDF:", error);
+    if (downloadError || !file) {
+      console.error("Erro download:", downloadError);
       return NextResponse.json(
         { error: "Erro ao baixar PDF" },
         { status: 500 }
       );
     }
 
-    const buffer = Buffer.from(await data.arrayBuffer());
-    console.log("✅ PDF baixado");
+    const buffer = Buffer.from(await file.arrayBuffer());
+    console.log("PDF baixado do Storage");
 
     /* =========================
-       2️⃣ Upload PDF para OpenAI
+       2️⃣ Enviar PDF para OpenAI
     ========================= */
 
     const uploadedFile = await openai.files.create({
@@ -66,10 +66,10 @@ export async function POST(req) {
       purpose: "assistants",
     });
 
-    console.log("📤 PDF enviado para OpenAI:", uploadedFile.id);
+    console.log("Arquivo enviado para OpenAI:", uploadedFile.id);
 
     /* =========================
-       3️⃣ Extração via IA
+       3️⃣ Extração com IA
     ========================= */
 
     const response = await openai.responses.create({
@@ -81,18 +81,19 @@ export async function POST(req) {
             {
               type: "input_text",
               text: `
-Extraia APENAS os pernoites da escala em PDF.
+Você receberá uma escala de voo em PDF.
 
-Formato JSON estrito:
+Extraia APENAS os pernoites no seguinte formato JSON:
 
 [
   { "city": "GRU", "date": "YYYY-MM-DD" }
 ]
 
 Regras:
-- Cidade em IATA (3 letras)
-- Data ISO
-- Nenhum texto fora do JSON
+- Cidade sempre IATA (3 letras)
+- Data em ISO (YYYY-MM-DD)
+- Não explique nada
+- Não escreva nada fora do JSON
               `,
             },
             {
@@ -104,25 +105,19 @@ Regras:
       ],
     });
 
-    const text =
+    const rawText =
       response.output_text ||
-      response.output?.[0]?.content?.find(c => c.type === "output_text")?.text;
+      response.output?.[0]?.content?.[0]?.text ||
+      "";
 
-    console.log("🤖 Resposta IA:", text);
-
-    if (!text) {
-      return NextResponse.json(
-        { error: "IA não retornou texto" },
-        { status: 500 }
-      );
-    }
+    console.log("Resposta da IA:", rawText);
 
     let stays;
     try {
-      stays = JSON.parse(text);
+      stays = JSON.parse(rawText);
     } catch {
       return NextResponse.json(
-        { error: "JSON inválido retornado pela IA", raw: text },
+        { error: "IA retornou JSON inválido", rawText },
         { status: 500 }
       );
     }
@@ -138,33 +133,33 @@ Regras:
        4️⃣ Salvar pernoites
     ========================= */
 
-    const rows = stays.map(s => ({
-      city: s.city.toLowerCase(),
+    const inserts = stays.map((s) => ({
+      city: s.city.toUpperCase(),
       date: s.date,
       user_email,
     }));
 
     const { error: insertError } = await supabase
       .from("stays")
-      .insert(rows);
+      .insert(inserts);
 
     if (insertError) {
-      console.error("❌ Erro DB:", insertError);
+      console.error("Erro insert:", insertError);
       return NextResponse.json(
         { error: "Erro ao salvar pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("💾 Pernoites salvos");
+    console.log("Pernoites salvos com sucesso");
 
     /* =========================
-       5️⃣ Notificações
+       5️⃣ Notificação individual
     ========================= */
 
     for (const stay of stays) {
       await notifyMatches({
-        city: stay.city.toLowerCase(),
+        city: stay.city,
         date: stay.date,
         triggeringEmail: user_email,
       });
@@ -176,7 +171,7 @@ Regras:
     });
 
   } catch (err) {
-    console.error("🔥 Erro process-scale:", err);
+    console.error("Erro geral process-scale:", err);
     return NextResponse.json(
       { error: "Erro ao processar escala com IA" },
       { status: 500 }
