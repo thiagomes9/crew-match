@@ -1,241 +1,189 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { supabase } from "../lib/supabase";
+import { useEffect, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+/* =========================
+   SUPABASE CLIENT (FRONT)
+========================= */
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
+
+/* =========================
+   PAGE
+========================= */
 
 export default function Home() {
-  const [email, setEmail] = useState("");
-  const [logged, setLogged] = useState(false);
+  const [file, setFile] = useState(null);
   const [city, setCity] = useState("");
   const [date, setDate] = useState("");
   const [stays, setStays] = useState([]);
-  const [matches, setMatches] = useState([]);
-  const [file, setFile] = useState(null);
-  async function uploadScale() {
-    async function uploadScale() {
-  console.log("UPLOAD SCALE CLICKADO");}
 
-  if (!file) {
-    alert("Selecione um arquivo primeiro");
-    return;
-  }
+  // 🔒 usuário fixo por enquanto (como está no seu projeto)
+  const userEmail = "joao@joao.com.br";
 
-  console.log("Arquivo:", file.name);
-
-    
-  if (!file) {
-    alert("Selecione um arquivo primeiro");
-    return;
-  }
-
-  const fileExt = file.name.split(".").pop();
-  const filePath = `${email}/${Date.now()}.${fileExt}`;
-
-  const { data, error } = await supabase.storage
-    .from("schedules")
-    .upload(filePath, file);
-
-  if (error) {
-    console.error(error);
-    alert(error.message);
-    return;
-  }
-
-  // Chamar a IA
-  const res = await fetch("/api/process-scale", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      path: filePath,
-      email,
-    }),
-  });
-
-  const json = await res.json();
-
-  if (!json.ok) {
-    alert("Erro ao processar escala com IA");
-    console.error(json);
-    return;
-  }
-
-  alert("Escala processada! Pernoites cadastrados automaticamente.");
-  loadStays();
-}
-
-
-  
-
-  
-
-  function calculateMatches(stays) {
-  const groups = {};
-
-  stays.forEach((s) => {
-    const key = `${s.city}|${s.date}`;
-
-    if (!groups[key]) {
-      groups[key] = {
-        city: s.city,
-        date: s.date,
-        users: [],
-      };
-    }
-
-    if (!groups[key].users.includes(s.user_email)) {
-      groups[key].users.push(s.user_email);
-    }
-  });
-
-  const result = Object.values(groups).filter(
-    (g) => g.users.length > 1
-  );
-
-  setMatches(result);
-}
-
-
-
-  useEffect(() => {
-    const user = localStorage.getItem("dev_user");
-    if (user) {
-      setEmail(user);
-      setLogged(true);
-      loadStays();
-      function calculateMatches(stays) {
-  const groups = {};
-
-  stays.forEach((s) => {
-    const key = `${s.city}|${s.date}`;
-    if (!groups[key]) {
-      groups[key] = {
-        city: s.city,
-        date: s.date,
-        users: [],
-      };
-    }
-    groups[key].users.push(s.user_email);
-  });
-
-  const result = Object.values(groups).filter(
-    (g) => g.users.length > 1
-  );
-
-  setMatches(result);
-}
-
-    }
-  }, []);
+  /* =========================
+     LOAD STAYS
+  ========================= */
 
   async function loadStays() {
-  const { data, error } = await supabase
-    .from("stays")
-    .select("*")
-    .order("date");
+    const { data } = await supabase
+      .from("stays")
+      .select("*")
+      .order("date", { ascending: true });
 
-  if (!error) {
-    setStays(data);
-    calculateMatches(data);
+    setStays(data || []);
   }
-}
 
+  useEffect(() => {
+    loadStays();
+  }, []);
 
-  async function saveStay() {
-    const { error } = await supabase.from("stays").insert([
-      { user_email: email, city, date }
-    ]);
+  /* =========================
+     ENVIAR ESCALA PARA IA
+  ========================= */
 
-    if (!error) {
-      setCity("");
-      setDate("");
+  async function enviarEscalaParaIA() {
+    try {
+      if (!file) {
+        alert("Selecione um PDF primeiro");
+        return;
+      }
+
+      const fileName = `${Date.now()}.pdf`;
+      const filePath = `${userEmail}/${fileName}`;
+
+      // 1️⃣ Upload no Supabase Storage
+      const { error: uploadError } = await supabase.storage
+        .from("schedules")
+        .upload(filePath, file, {
+          contentType: "application/pdf",
+          upsert: false,
+        });
+
+      if (uploadError) {
+        console.error(uploadError);
+        alert("Erro ao enviar PDF");
+        return;
+      }
+
+      // 2️⃣ Chamada da IA
+      const res = await fetch("/api/process-scale", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filePath,
+          user_email: userEmail,
+        }),
+      });
+
+      const text = await res.text();
+      console.log("process-scale:", res.status, text);
+
+      if (!res.ok) {
+        alert("Erro ao processar escala com IA");
+        return;
+      }
+
+      alert("Escala processada com sucesso!");
+      setFile(null);
       loadStays();
+
+    } catch (err) {
+      console.error(err);
+      alert("Erro inesperado");
     }
   }
 
-  if (!logged) {
-    return (
-      <main style={{ padding: 20 }}>
-        <h1>✈️ Crew Match</h1>
-        <input
-          placeholder="Seu email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-        <button onClick={() => {
-          localStorage.setItem("dev_user", email);
-          setLogged(true);
-        }}>
-          Entrar (dev)
-        </button>
-      </main>
-    );
+  /* =========================
+     SALVAR PERNOITE MANUAL
+  ========================= */
+
+  async function salvarPernoiteManual() {
+    if (!city || !date) {
+      alert("Preencha cidade e data");
+      return;
+    }
+
+    const res = await fetch("/api/save-stay", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        city,
+        date,
+        user_email: userEmail,
+      }),
+    });
+
+    const data = await res.json();
+    console.log("save-stay:", data);
+
+    if (!res.ok) {
+      alert("Erro ao salvar pernoite");
+      return;
+    }
+
+    setCity("");
+    setDate("");
+    loadStays();
   }
 
+  /* =========================
+     UI
+  ========================= */
+
   return (
-    <main style={{ padding: 20 }}>
+    <main style={{ padding: 20, maxWidth: 600 }}>
       <h1>✈️ Crew Match</h1>
-      <p>Logado como: {email}</p>
+      <p>Logado como: <b>{userEmail}</b></p>
+
       <hr />
 
-<h3>📎 Enviar escala</h3>
+      <h2>📄 Enviar escala</h2>
 
-<input
-  type="file"
-  accept="image/*,.pdf"
-  onChange={(e) => setFile(e.target.files[0])}
-/>
-
-<button onClick={uploadScale} style={{ marginTop: 10 }}>
-  Enviar escala para IA
-</button>
-
-<hr />
-
-      <button
-  onClick={() => {
-    localStorage.removeItem("dev_user");
-    location.reload();
-  }}
->
-  Trocar usuário
-</button>
-
-<hr />
-
-
-      <h3>Novo pernoite</h3>
       <input
-        placeholder="Cidade"
-        value={city}
-        onChange={(e) => setCity(e.target.value)}
+        type="file"
+        accept="application/pdf"
+        onChange={(e) => setFile(e.target.files[0])}
       />
+
       <br /><br />
+
+      <button onClick={enviarEscalaParaIA}>
+        Enviar escala para IA
+      </button>
+
+      <hr />
+
+      <h2>🏨 Novo pernoite</h2>
+
+      <input
+        placeholder="Cidade (ex: GRU)"
+        value={city}
+        onChange={(e) => setCity(e.target.value.toUpperCase())}
+      />
+
+      <br /><br />
+
       <input
         type="date"
         value={date}
         onChange={(e) => setDate(e.target.value)}
       />
+
       <br /><br />
-      <button onClick={saveStay}>Salvar pernoite</button>
+
+      <button onClick={salvarPernoiteManual}>
+        Salvar pernoite
+      </button>
 
       <hr />
-      <h3>🤝 Matches de pernoite</h3>
 
-{matches.length === 0 && <p>Nenhum match ainda</p>}
+      <h2>📌 Pernoites cadastrados</h2>
 
-{matches.map((m, index) => (
-  <div key={index} style={{ marginBottom: 10 }}>
-    <strong>📍 {m.city} — {m.date}</strong>
-    <ul>
-      {m.users.map((u, i) => (
-        <li key={i}>{u}</li>
-      ))}
-    </ul>
-  </div>
-))}
-
-
-      <h3>Pernoites cadastrados</h3>
       <ul>
         {stays.map((s) => (
           <li key={s.id}>
