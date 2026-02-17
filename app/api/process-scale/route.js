@@ -36,16 +36,16 @@ export async function POST(req) {
     }
 
     /* =========================
-       1️⃣ Baixar PDF do Storage
+       1️⃣ Baixar PDF
     ========================= */
 
-    const { data: file, error: downloadError } = await supabase
+    const { data: file, error } = await supabase
       .storage
       .from("schedules")
       .download(filePath);
 
-    if (downloadError || !file) {
-      console.error("Erro download:", downloadError);
+    if (error || !file) {
+      console.error("Erro download:", error);
       return NextResponse.json(
         { error: "Erro ao baixar PDF" },
         { status: 500 }
@@ -56,17 +56,17 @@ export async function POST(req) {
     console.log("PDF baixado do Storage");
 
     /* =========================
-       2️⃣ Enviar PDF para OpenAI
+       2️⃣ Upload para OpenAI
     ========================= */
 
-    const uploadedFile = await openai.files.create({
+    const uploaded = await openai.files.create({
       file: new File([buffer], "escala.pdf", {
         type: "application/pdf",
       }),
       purpose: "assistants",
     });
 
-    console.log("Arquivo enviado para OpenAI:", uploadedFile.id);
+    console.log("PDF enviado para OpenAI:", uploaded.id);
 
     /* =========================
        3️⃣ Extração com IA
@@ -81,41 +81,49 @@ export async function POST(req) {
             {
               type: "input_text",
               text: `
-Você receberá uma escala de voo em PDF.
+Extraia APENAS os pernoites deste PDF.
 
-Extraia APENAS os pernoites no seguinte formato JSON:
-
+Formato EXATO:
 [
   { "city": "GRU", "date": "YYYY-MM-DD" }
 ]
 
 Regras:
-- Cidade sempre IATA (3 letras)
-- Data em ISO (YYYY-MM-DD)
-- Não explique nada
-- Não escreva nada fora do JSON
+- Apenas JSON
+- Sem explicações
+- Cidade em IATA
               `,
             },
             {
               type: "input_file",
-              file_id: uploadedFile.id,
+              file_id: uploaded.id,
             },
           ],
         },
       ],
     });
 
-    const rawText =
+    let rawText =
       response.output_text ||
       response.output?.[0]?.content?.[0]?.text ||
       "";
 
-    console.log("Resposta da IA:", rawText);
+    console.log("Resposta bruta da IA:", rawText);
+
+    /* =========================
+       4️⃣ LIMPEZA CRÍTICA (FIX)
+    ========================= */
+
+    rawText = rawText
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
 
     let stays;
     try {
       stays = JSON.parse(rawText);
-    } catch {
+    } catch (e) {
+      console.error("JSON inválido:", rawText);
       return NextResponse.json(
         { error: "IA retornou JSON inválido", rawText },
         { status: 500 }
@@ -130,10 +138,10 @@ Regras:
     }
 
     /* =========================
-       4️⃣ Salvar pernoites
+       5️⃣ Salvar pernoites
     ========================= */
 
-    const inserts = stays.map((s) => ({
+    const inserts = stays.map(s => ({
       city: s.city.toUpperCase(),
       date: s.date,
       user_email,
@@ -144,26 +152,20 @@ Regras:
       .insert(inserts);
 
     if (insertError) {
-      console.error("Erro insert:", insertError);
+      console.error(insertError);
       return NextResponse.json(
         { error: "Erro ao salvar pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("Pernoites salvos com sucesso");
+    console.log("Pernoites salvos:", inserts.length);
 
     /* =========================
-       5️⃣ Notificação individual
+       6️⃣ Notificações
     ========================= */
 
-    for (const stay of stays) {
-      await notifyMatches({
-        city: stay.city,
-        date: stay.date,
-        triggeringEmail: user_email,
-      });
-    }
+    await notifyMatches(stays);
 
     return NextResponse.json({
       ok: true,
@@ -171,9 +173,9 @@ Regras:
     });
 
   } catch (err) {
-    console.error("Erro geral process-scale:", err);
+    console.error("Erro process-scale:", err);
     return NextResponse.json(
-      { error: "Erro ao processar escala com IA" },
+      { error: "Erro interno process-scale" },
       { status: 500 }
     );
   }
