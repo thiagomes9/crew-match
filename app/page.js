@@ -70,33 +70,33 @@ export default function Home() {
      PROCESS SCALE (IA)
   ========================= */
   async function processScale() {
-    if (!file) {
-      alert("Selecione um arquivo");
-      return;
-    }
-
-    const filePath = `${userEmail}/${file.name}`;
-
-    const res = await fetch("/api/process-scale", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filePath,
-        user_email: userEmail,
-      }),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      alert(data.error || "Erro ao processar escala com IA");
-      return;
-    }
-
-    await loadStays();
-    await loadMatches();
+  if (!file) {
+    alert("Selecione um arquivo");
+    return;
   }
 
+  const formData = new FormData();
+  formData.append("file", file);
+
+  // ⚠️ por enquanto vamos manter email,
+  // depois migraremos para user_id (UUID)
+  formData.append("user_id", userEmail);
+
+  const res = await fetch("/api/process-scale", {
+    method: "POST",
+    body: formData, // 👈 MUITO IMPORTANTE
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    alert(data.error || "Erro ao processar escala com IA");
+    return;
+  }
+
+  await loadStays();
+  await loadMatches();
+}
   return (
     <main style={{ padding: 20 }}>
       <h1>✈️ Crew Match</h1>
