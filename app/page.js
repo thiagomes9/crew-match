@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import * as pdfjsLib from "pdfjs-dist/build/pdf";
-import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
+import { getDocument } from "pdfjs-dist";
 
 // obrigatório para pdfjs no browser
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -75,22 +74,21 @@ export default function Home() {
   /* =========================
      EXTRACT PDF TEXT (BROWSER)
   ========================= */
-  async function extractTextFromPdf(file) {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+async function extractTextFromPdf(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await getDocument({ data: arrayBuffer }).promise;
 
-    let text = "";
+  let text = "";
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
 
-      text += content.items.map(item => item.str).join(" ") + "\n";
-    }
-
-    return text;
+    text += content.items.map(item => item.str || "").join(" ") + "\n";
   }
 
+  return text;
+}
   /* =========================
      PROCESS SCALE (IA)
   ========================= */
