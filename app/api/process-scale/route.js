@@ -50,42 +50,47 @@ export async function POST(req) {
     const userId = profile.id;
 
     /* =========================
-       3️⃣ LER PDF COM PDF.JS (LEGACY – NODE SAFE)
-    ========================= */
-    let rawText = "";
+   3️⃣ LER PDF COM PDF.JS (v5.x – NODE SAFE)
+========================= */
+let rawText = "";
 
-    try {
-      // ⚠️ IMPORTANTE: require dentro da função
-      const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
+try {
+  // pdfjs-dist v5.x → usar build/pdf.mjs
+  const pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
 
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const loadingTask = pdfjsLib.getDocument({ data: buffer });
-      const pdf = await loadingTask.promise;
+  const buffer = Buffer.from(await file.arrayBuffer());
 
-      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-        const page = await pdf.getPage(pageNum);
-        const content = await page.getTextContent();
+  const loadingTask = pdfjsLib.getDocument({
+    data: buffer,
+    disableFontFace: true, // importante em Node
+  });
 
-        const pageText = content.items
-          .map((item) => item.str)
-          .join(" ");
+  const pdf = await loadingTask.promise;
 
-        rawText += pageText + "\n";
-      }
-    } catch (e) {
-      console.error("PDFJS LEGACY ERROR:", e);
-      return NextResponse.json(
-        { error: "Erro ao extrair texto do PDF" },
-        { status: 400 }
-      );
-    }
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
 
-    if (!rawText || rawText.trim().length === 0) {
-      return NextResponse.json(
-        { error: "PDF não contém texto legível" },
-        { status: 400 }
-      );
-    }
+    const pageText = content.items
+      .map((item) => item.str || "")
+      .join(" ");
+
+    rawText += pageText + "\n";
+  }
+} catch (e) {
+  console.error("PDFJS ERROR:", e);
+  return NextResponse.json(
+    { error: "Erro ao extrair texto do PDF" },
+    { status: 400 }
+  );
+}
+
+if (!rawText || rawText.trim().length === 0) {
+  return NextResponse.json(
+    { error: "PDF não contém texto legível" },
+    { status: 400 }
+  );
+}
 
     /* =========================
        4️⃣ CRIAR SCHEDULE
