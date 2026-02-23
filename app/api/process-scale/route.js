@@ -12,8 +12,21 @@ const supabase = createClient(
 );
 
 export async function POST(req) {
+  // 🔥 LOG FORÇADO – NÃO REMOVER AGORA
+  console.log("🔥 process-scale EXECUTADO", new Date().toISOString());
+
   try {
-    const { raw_text, user_email } = await req.json();
+    /* =========================
+       1️⃣ LER BODY (JSON)
+    ========================= */
+    const body = await req.json();
+    const { raw_text, user_email } = body;
+
+    console.log("📥 body recebido:", {
+      hasText: !!raw_text,
+      user_email,
+      textLength: raw_text?.length,
+    });
 
     if (!raw_text || !user_email) {
       return NextResponse.json(
@@ -22,13 +35,17 @@ export async function POST(req) {
       );
     }
 
-    const { data: profile } = await supabase
+    /* =========================
+       2️⃣ BUSCAR USER (UUID)
+    ========================= */
+    const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("id")
       .eq("email", user_email)
       .single();
 
-    if (!profile) {
+    if (profileError || !profile) {
+      console.error("❌ profileError:", profileError);
       return NextResponse.json(
         { error: "Usuário não encontrado" },
         { status: 400 }
@@ -36,8 +53,12 @@ export async function POST(req) {
     }
 
     const userId = profile.id;
+    console.log("👤 userId:", userId);
 
-    const { data: schedule } = await supabase
+    /* =========================
+       3️⃣ CRIAR SCHEDULE
+    ========================= */
+    const { data: schedule, error: scheduleError } = await supabase
       .from("schedules")
       .insert({
         user_id: userId,
@@ -47,6 +68,16 @@ export async function POST(req) {
       .select()
       .single();
 
+    if (scheduleError) {
+      console.error("❌ scheduleError:", scheduleError);
+      throw scheduleError;
+    }
+
+    console.log("📄 schedule criado:", schedule.id);
+
+    /* =========================
+       4️⃣ OPENAI – EXTRAIR PERNOITES
+    ========================= */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
@@ -54,8 +85,9 @@ export async function POST(req) {
         {
           role: "system",
           content: `
-Extraia APENAS os pernoites da escala.
-Retorne SOMENTE JSON no formato:
+Você é um parser de escala aérea.
+Extraia APENAS os pernoites.
+Retorne SOMENTE JSON válido no formato:
 
 [
   {
@@ -66,13 +98,35 @@ Retorne SOMENTE JSON no formato:
 ]
           `,
         },
-        { role: "user", content: raw_text },
+        {
+          role: "user",
+          content: raw_text,
+        },
       ],
     });
 
-    const stays = JSON.parse(completion.choices[0].message.content);
+    console.log("🤖 OpenAI respondeu");
 
-    const formatted = stays.map(s => ({
+    let stays;
+
+    try {
+      stays = JSON.parse(completion.choices[0].message.content);
+    } catch (e) {
+      console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
+      throw new Error("Resposta da OpenAI não é JSON válido");
+    }
+
+    if (!Array.isArray(stays) || stays.length === 0) {
+      return NextResponse.json(
+        { error: "Nenhum pernoite encontrado na escala" },
+        { status: 400 }
+      );
+    }
+
+    /* =========================
+       5️⃣ INSERIR STAYS
+    ========================= */
+    const formattedStays = stays.map((s) => ({
       user_id: userId,
       city: s.city,
       check_in: s.check_in,
@@ -80,16 +134,30 @@ Retorne SOMENTE JSON no formato:
       schedule_id: schedule.id,
     }));
 
-    await supabase.from("stays").insert(formatted);
+    const { error: staysError } = await supabase
+      .from("stays")
+      .insert(formattedStays);
 
+    if (staysError) {
+      console.error("❌ staysError:", staysError);
+      throw staysError;
+    }
+
+    console.log("📍 stays inseridos:", formattedStays.length);
+
+    /* =========================
+       6️⃣ FINALIZAR SCHEDULE
+    ========================= */
     await supabase
       .from("schedules")
       .update({ processed: true })
       .eq("id", schedule.id);
 
+    console.log("✅ process-scale FINALIZADO");
+
     return NextResponse.json({ success: true });
-  } catch (e) {
-    console.error(e);
+  } catch (error) {
+    console.error("🔥 process-scale ERROR:", error);
     return NextResponse.json(
       { error: "Erro ao processar escala" },
       { status: 500 }
