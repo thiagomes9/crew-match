@@ -71,27 +71,29 @@ export default function Home() {
      EXTRACT PDF TEXT (BROWSER SAFE)
   ========================= */
   async function extractTextFromPdf(file) {
-    // carregar pdfjs dinamicamente (apenas no browser)
-    const pdfjs = await import("pdfjs-dist/build/pdf");
-    const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs");
+  // carregar pdfjs dinamicamente (browser only)
+  const pdfjs = await import("pdfjs-dist/build/pdf");
 
-    // configurar worker (OBRIGATÓRIO)
-    pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+  // ⚠️ worker como URL (forma correta no v5)
+  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+    "pdfjs-dist/build/pdf.worker.min.mjs",
+    import.meta.url
+  ).toString();
 
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
-    let text = "";
+  let text = "";
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
 
-      text += content.items.map(item => item.str || "").join(" ") + "\n";
-    }
-
-    return text;
+    text += content.items.map(item => item.str || "").join(" ") + "\n";
   }
+
+  return text;
+}
 
   /* =========================
      PROCESS SCALE (IA)
