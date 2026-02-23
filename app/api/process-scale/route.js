@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import pdfParse from "pdf-parse";;
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
@@ -9,7 +8,7 @@ const openai = new OpenAI({
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // necessário para inserir com RLS
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 export async function POST(req) {
@@ -25,12 +24,15 @@ export async function POST(req) {
       );
     }
 
-    /* 1️⃣ Ler PDF */
+    // 🔹 pdf-parse usando require (compatível com Turbopack)
+    const pdfParse = require("pdf-parse");
+
+    // 1️⃣ Ler PDF
     const buffer = Buffer.from(await file.arrayBuffer());
-    const pdfData = await pdfParse(buffer);;
+    const pdfData = await pdfParse(buffer);
     const rawText = pdfData.text;
 
-    /* 2️⃣ Criar schedule */
+    // 2️⃣ Criar schedule (escala bruta)
     const { data: schedule, error: scheduleError } = await supabase
       .from("schedules")
       .insert({
@@ -41,9 +43,12 @@ export async function POST(req) {
       .select()
       .single();
 
-    if (scheduleError) throw scheduleError;
+    if (scheduleError) {
+      console.error("schedule error:", scheduleError);
+      throw scheduleError;
+    }
 
-    /* 3️⃣ Chamar OpenAI (somente para pernoites) */
+    // 3️⃣ OpenAI – extrair pernoites
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
@@ -73,7 +78,11 @@ Retorne SOMENTE JSON válido no formato:
 
     const stays = JSON.parse(completion.choices[0].message.content);
 
-    /* 4️⃣ Inserir pernoites */
+    if (!Array.isArray(stays)) {
+      throw new Error("Resposta da OpenAI não é um array");
+    }
+
+    // 4️⃣ Inserir pernoites
     const formattedStays = stays.map((stay) => ({
       user_id: userId,
       city: stay.city,
@@ -86,9 +95,12 @@ Retorne SOMENTE JSON válido no formato:
       .from("stays")
       .insert(formattedStays);
 
-    if (staysError) throw staysError;
+    if (staysError) {
+      console.error("stays error:", staysError);
+      throw staysError;
+    }
 
-    /* 5️⃣ Marcar schedule como processado */
+    // 5️⃣ Marcar schedule como processado
     await supabase
       .from("schedules")
       .update({ processed: true })
