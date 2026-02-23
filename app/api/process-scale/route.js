@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import pdf from "pdf-parse";
+import pdfParse from "pdf-parse";;
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
@@ -27,7 +27,7 @@ export async function POST(req) {
 
     /* 1️⃣ Ler PDF */
     const buffer = Buffer.from(await file.arrayBuffer());
-    const pdfData = await pdf(buffer);
+    const pdfData = await pdfParse(buffer);;
     const rawText = pdfData.text;
 
     /* 2️⃣ Criar schedule */
