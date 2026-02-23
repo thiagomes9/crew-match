@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
+/* =========================
+   CLIENTES
+========================= */
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -11,12 +14,15 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+/* =========================
+   POST /api/process-scale
+========================= */
 export async function POST(req) {
   console.log("🔥 process-scale EXECUTADO", new Date().toISOString());
 
   try {
     /* =========================
-       1️⃣ LER BODY
+       1️⃣ BODY
     ========================= */
     const { raw_text, user_email } = await req.json();
 
@@ -28,7 +34,7 @@ export async function POST(req) {
     }
 
     /* =========================
-       2️⃣ BUSCAR USUÁRIO
+       2️⃣ USUÁRIO
     ========================= */
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
@@ -47,7 +53,7 @@ export async function POST(req) {
     const userId = profile.id;
 
     /* =========================
-       3️⃣ CRIAR SCHEDULE
+       3️⃣ SCHEDULE
     ========================= */
     const { error: scheduleError } = await supabase
       .from("schedules")
@@ -66,7 +72,7 @@ export async function POST(req) {
     }
 
     /* =========================
-       4️⃣ OPENAI – EXTRAIR PERNOITES
+       4️⃣ OPENAI
     ========================= */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -76,7 +82,12 @@ export async function POST(req) {
           role: "system",
           content: `
 Você é um parser de escala aérea.
-Extraia APENAS os pernoites.
+Extraia APENAS pernoites reais.
+
+Considere pernoite somente quando:
+- houver permanência mínima de 6 horas
+- a permanência atravesse a madrugada
+
 Retorne SOMENTE JSON válido no formato:
 
 [
@@ -86,6 +97,9 @@ Retorne SOMENTE JSON válido no formato:
     "check_out": "YYYY-MM-DDTHH:mm"
   }
 ]
+
+NÃO use markdown.
+NÃO use \`\`\`json.
           `,
         },
         {
@@ -95,44 +109,84 @@ Retorne SOMENTE JSON válido no formato:
       ],
     });
 
+    /* =========================
+       5️⃣ PARSE JSON (ROBUSTO)
+    ========================= */
     let stays;
 
-try {
-  let raw = completion.choices[0].message.content;
+    try {
+      let raw = completion.choices[0].message.content;
 
-  // remover markdown ```json ```
-  raw = raw
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
+      raw = raw
+        .replace(/```json/gi, "")
+        .replace(/```/g, "")
+        .trim();
 
-  stays = JSON.parse(raw);
-} catch (e) {
-  console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
-  return NextResponse.json(
-    { error: "Resposta inválida da IA" },
-    { status: 500 }
-  );
-}
-
-    if (!Array.isArray(stays) || stays.length === 0) {
+      stays = JSON.parse(raw);
+    } catch (e) {
+      console.error(
+        "❌ JSON inválido da OpenAI:",
+        completion.choices[0].message.content
+      );
       return NextResponse.json(
-        { error: "Nenhum pernoite encontrado" },
+        { error: "Resposta inválida da IA" },
+        { status: 500 }
+      );
+    }
+
+    if (!Array.isArray(stays)) {
+      return NextResponse.json(
+        { error: "Formato inesperado da IA" },
+        { status: 500 }
+      );
+    }
+
+    /* =========================
+       6️⃣ FILTRO DE PERNOITES
+    ========================= */
+    const filteredStays = stays.filter((s) => {
+      if (!s.check_in || !s.check_out || !s.city) return false;
+
+      const start = new Date(s.check_in);
+      const end = new Date(s.check_out);
+
+      if (isNaN(start) || isNaN(end)) return false;
+
+      const hours = (end - start) / (1000 * 60 * 60);
+      const startHour = start.getHours();
+
+      return (
+        hours >= 6 &&
+        (startHour >= 18 || startHour <= 6)
+      );
+    });
+
+    if (filteredStays.length === 0) {
+      return NextResponse.json(
+        { error: "Nenhum pernoite válido encontrado" },
         { status: 400 }
       );
     }
 
     /* =========================
-       5️⃣ INSERIR STAYS
+       7️⃣ FORMATAR STAYS
     ========================= */
-    const formattedStays = stays.map((s) => ({
-      user_id: userId,
-      user_email,
-      city: s.city,
-      check_in: s.check_in,
-      check_out: s.check_out,
-    }));
+    const formattedStays = filteredStays.map((s) => {
+      const date = s.check_in.split("T")[0]; // YYYY-MM-DD
 
+      return {
+        user_id: userId,
+        user_email,
+        city: s.city,
+        date,
+        check_in: s.check_in,
+        check_out: s.check_out,
+      };
+    });
+
+    /* =========================
+       8️⃣ INSERIR STAYS
+    ========================= */
     const { error: staysError } = await supabase
       .from("stays")
       .insert(formattedStays);
@@ -146,7 +200,7 @@ try {
     }
 
     /* =========================
-       6️⃣ FINALIZAR
+       9️⃣ FINALIZAR
     ========================= */
     await supabase
       .from("schedules")
@@ -154,13 +208,13 @@ try {
       .eq("user_id", userId)
       .eq("processed", false);
 
-    console.log("✅ process-scale FINALIZADO COM SUCESSO");
+    console.log("✅ process-scale FINALIZADO");
 
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("🔥 process-scale ERROR:", error);
     return NextResponse.json(
-      { error: "Erro ao processar escala" },
+      { error: "Erro interno ao processar escala" },
       { status: 500 }
     );
   }
