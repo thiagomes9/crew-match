@@ -1,26 +1,20 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
+// Supabase (service role – server side)
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 export async function POST(req) {
-  // 🔥 LOG FORÇADO – NÃO REMOVER AGORA
   console.log("🔥 process-scale EXECUTADO", new Date().toISOString());
 
   try {
     /* =========================
-       1️⃣ LER BODY (JSON)
+       1️⃣ LER BODY
     ========================= */
-    const body = await req.json();
-    const { raw_text, user_email } = body;
+    const { raw_text, user_email } = await req.json();
 
     console.log("📥 body recebido:", {
       hasText: !!raw_text,
@@ -36,7 +30,7 @@ export async function POST(req) {
     }
 
     /* =========================
-       2️⃣ BUSCAR USER (UUID)
+       2️⃣ BUSCAR USUÁRIO
     ========================= */
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
@@ -47,7 +41,7 @@ export async function POST(req) {
     if (profileError || !profile) {
       console.error("❌ profileError:", profileError);
       return NextResponse.json(
-        { error: "Usuário não encontrado" },
+        { error: "Usuário não encontrado em profiles" },
         { status: 400 }
       );
     }
@@ -70,58 +64,30 @@ export async function POST(req) {
 
     if (scheduleError) {
       console.error("❌ scheduleError:", scheduleError);
-      throw scheduleError;
+      return NextResponse.json(
+        { error: "Erro ao criar schedule" },
+        { status: 500 }
+      );
     }
 
     console.log("📄 schedule criado:", schedule.id);
 
     /* =========================
-       4️⃣ OPENAI – EXTRAIR PERNOITES
+       4️⃣ MOCK DE PERNOITES
+       (substitui OpenAI temporariamente)
     ========================= */
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: `
-Você é um parser de escala aérea.
-Extraia APENAS os pernoites.
-Retorne SOMENTE JSON válido no formato:
-
-[
-  {
-    "city": "string",
-    "check_in": "YYYY-MM-DDTHH:mm",
-    "check_out": "YYYY-MM-DDTHH:mm"
-  }
-]
-          `,
-        },
-        {
-          role: "user",
-          content: raw_text,
-        },
-      ],
-    });
-
-    console.log("🤖 OpenAI respondeu");
-
-    let stays;
-
-    try {
-      stays = JSON.parse(completion.choices[0].message.content);
-    } catch (e) {
-      console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
-      throw new Error("Resposta da OpenAI não é JSON válido");
-    }
-
-    if (!Array.isArray(stays) || stays.length === 0) {
-      return NextResponse.json(
-        { error: "Nenhum pernoite encontrado na escala" },
-        { status: 400 }
-      );
-    }
+    const stays = [
+      {
+        city: "GRU",
+        check_in: "2026-03-01T22:00",
+        check_out: "2026-03-02T08:00",
+      },
+      {
+        city: "SDU",
+        check_in: "2026-03-05T23:30",
+        check_out: "2026-03-06T07:00",
+      },
+    ];
 
     /* =========================
        5️⃣ INSERIR STAYS
@@ -140,7 +106,10 @@ Retorne SOMENTE JSON válido no formato:
 
     if (staysError) {
       console.error("❌ staysError:", staysError);
-      throw staysError;
+      return NextResponse.json(
+        { error: "Erro ao inserir stays" },
+        { status: 500 }
+      );
     }
 
     console.log("📍 stays inseridos:", formattedStays.length);
@@ -153,7 +122,7 @@ Retorne SOMENTE JSON válido no formato:
       .update({ processed: true })
       .eq("id", schedule.id);
 
-    console.log("✅ process-scale FINALIZADO");
+    console.log("✅ process-scale FINALIZADO COM SUCESSO");
 
     return NextResponse.json({ success: true });
   } catch (error) {
