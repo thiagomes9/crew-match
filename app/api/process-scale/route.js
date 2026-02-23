@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
+import * as pdfjsLib from "pdfjs-dist/build/pdf.mjs";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -21,7 +21,7 @@ export async function POST(req) {
     const formData = await req.formData();
     const file = formData.get("file");
 
-    // frontend ainda envia email (MVP)
+    // MVP: frontend envia email
     const userEmail = formData.get("user_id");
 
     if (!file || !userEmail) {
