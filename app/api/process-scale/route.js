@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
+import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-// Supabase (service role – server side)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -15,12 +19,6 @@ export async function POST(req) {
        1️⃣ LER BODY
     ========================= */
     const { raw_text, user_email } = await req.json();
-
-    console.log("📥 body recebido:", {
-      hasText: !!raw_text,
-      user_email,
-      textLength: raw_text?.length,
-    });
 
     if (!raw_text || !user_email) {
       return NextResponse.json(
@@ -41,26 +39,23 @@ export async function POST(req) {
     if (profileError || !profile) {
       console.error("❌ profileError:", profileError);
       return NextResponse.json(
-        { error: "Usuário não encontrado em profiles" },
+        { error: "Usuário não encontrado" },
         { status: 400 }
       );
     }
 
     const userId = profile.id;
-    console.log("👤 userId:", userId);
 
     /* =========================
        3️⃣ CRIAR SCHEDULE
     ========================= */
-    const { data: schedule, error: scheduleError } = await supabase
+    const { error: scheduleError } = await supabase
       .from("schedules")
       .insert({
         user_id: userId,
         raw_text,
         processed: false,
-      })
-      .select()
-      .single();
+      });
 
     if (scheduleError) {
       console.error("❌ scheduleError:", scheduleError);
@@ -70,35 +65,65 @@ export async function POST(req) {
       );
     }
 
-    console.log("📄 schedule criado:", schedule.id);
-
     /* =========================
-       4️⃣ MOCK DE PERNOITES
-       (substitui OpenAI temporariamente)
+       4️⃣ OPENAI – EXTRAIR PERNOITES
     ========================= */
-    const stays = [
-      {
-        city: "GRU",
-        check_in: "2026-03-01T22:00",
-        check_out: "2026-03-02T08:00",
-      },
-      {
-        city: "SDU",
-        check_in: "2026-03-05T23:30",
-        check_out: "2026-03-06T07:00",
-      },
-    ];
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `
+Você é um parser de escala aérea.
+Extraia APENAS os pernoites.
+Retorne SOMENTE JSON válido no formato:
+
+[
+  {
+    "city": "GRU",
+    "check_in": "YYYY-MM-DDTHH:mm",
+    "check_out": "YYYY-MM-DDTHH:mm"
+  }
+]
+          `,
+        },
+        {
+          role: "user",
+          content: raw_text,
+        },
+      ],
+    });
+
+    let stays;
+
+    try {
+      stays = JSON.parse(completion.choices[0].message.content);
+    } catch (e) {
+      console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
+      return NextResponse.json(
+        { error: "Resposta inválida da IA" },
+        { status: 500 }
+      );
+    }
+
+    if (!Array.isArray(stays) || stays.length === 0) {
+      return NextResponse.json(
+        { error: "Nenhum pernoite encontrado" },
+        { status: 400 }
+      );
+    }
 
     /* =========================
        5️⃣ INSERIR STAYS
     ========================= */
-   const formattedStays = stays.map((s) => ({
-  user_id: userId,
-  user_email,
-  city: s.city,
-  check_in: s.check_in,
-  check_out: s.check_out,
-}));
+    const formattedStays = stays.map((s) => ({
+      user_id: userId,
+      user_email,
+      city: s.city,
+      check_in: s.check_in,
+      check_out: s.check_out,
+    }));
 
     const { error: staysError } = await supabase
       .from("stays")
@@ -107,20 +132,19 @@ export async function POST(req) {
     if (staysError) {
       console.error("❌ staysError:", staysError);
       return NextResponse.json(
-        { error: "Erro ao inserir stays" },
+        { error: "Erro ao inserir pernoites" },
         { status: 500 }
       );
     }
 
-    console.log("📍 stays inseridos:", formattedStays.length);
-
     /* =========================
-       6️⃣ FINALIZAR SCHEDULE
+       6️⃣ FINALIZAR
     ========================= */
     await supabase
       .from("schedules")
       .update({ processed: true })
-      .eq("id", schedule.id);
+      .eq("user_id", userId)
+      .eq("processed", false);
 
     console.log("✅ process-scale FINALIZADO COM SUCESSO");
 
