@@ -1,6 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import * as pdfjsLib from "pdfjs-dist/build/pdf";
+import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
+
+// obrigatório para pdfjs no browser
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 export default function Home() {
   const [file, setFile] = useState(null);
@@ -8,8 +13,9 @@ export default function Home() {
   const [date, setDate] = useState("");
   const [stays, setStays] = useState([]);
   const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(false);
 
-  // 🔒 usuário fixo (como está hoje no projeto)
+  // MVP: usuário fixo
   const userEmail = "joao@joao.com.br";
 
   /* =========================
@@ -67,55 +73,96 @@ export default function Home() {
   }
 
   /* =========================
+     EXTRACT PDF TEXT (BROWSER)
+  ========================= */
+  async function extractTextFromPdf(file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+    let text = "";
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+
+      text += content.items.map(item => item.str).join(" ") + "\n";
+    }
+
+    return text;
+  }
+
+  /* =========================
      PROCESS SCALE (IA)
   ========================= */
   async function processScale() {
-  if (!file) {
-    alert("Selecione um arquivo");
-    return;
+    if (!file) {
+      alert("Selecione um arquivo PDF");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      // 1️⃣ extrair texto no frontend
+      const rawText = await extractTextFromPdf(file);
+
+      if (!rawText.trim()) {
+        alert("Não foi possível extrair texto do PDF");
+        setLoading(false);
+        return;
+      }
+
+      // 2️⃣ enviar texto para o backend
+      const res = await fetch("/api/process-scale", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          raw_text: rawText,
+          user_email: userEmail,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        alert(data.error || "Erro ao processar escala");
+        setLoading(false);
+        return;
+      }
+
+      await loadStays();
+      await loadMatches();
+    } catch (e) {
+      console.error(e);
+      alert("Erro ao ler o PDF");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const formData = new FormData();
-  formData.append("file", file);
-
-  // ⚠️ por enquanto vamos manter email,
-  // depois migraremos para user_id (UUID)
-  formData.append("user_id", userEmail);
-
-  const res = await fetch("/api/process-scale", {
-    method: "POST",
-    body: formData, // 👈 MUITO IMPORTANTE
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    alert(data.error || "Erro ao processar escala com IA");
-    return;
-  }
-
-  await loadStays();
-  await loadMatches();
-}
   return (
     <main style={{ padding: 20 }}>
       <h1>✈️ Crew Match</h1>
-      <p>Logado como: <b>{userEmail}</b></p>
+      <p>
+        Logado como: <b>{userEmail}</b>
+      </p>
 
       <hr />
 
-      <h2>Enviar escala</h2>
+      <h2>📄 Enviar escala (PDF)</h2>
       <input
         type="file"
         accept="application/pdf"
         onChange={(e) => setFile(e.target.files[0])}
       />
       <br /><br />
-      <button onClick={processScale}>Enviar escala para IA</button>
+      <button onClick={processScale} disabled={loading}>
+        {loading ? "Processando..." : "Enviar escala para IA"}
+      </button>
 
       <hr />
 
-      <h2>Novo pernoite</h2>
+      <h2>➕ Novo pernoite (manual)</h2>
       <input
         placeholder="Cidade (ex: GRU)"
         value={city}
@@ -137,7 +184,7 @@ export default function Home() {
       <ul>
         {stays.map((s, i) => (
           <li key={i}>
-            📍 {s.city} — {s.date}
+            📍 {s.city} — {s.check_in || s.date}
           </li>
         ))}
       </ul>

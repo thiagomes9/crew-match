@@ -13,90 +13,40 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    /* =========================
-       1️⃣ FORM DATA
-    ========================= */
-    const formData = await req.formData();
-    const file = formData.get("file");
-    const userEmail = formData.get("user_id");
+    const { raw_text, user_email } = await req.json();
 
-    if (!file || !userEmail) {
+    if (!raw_text || !user_email) {
       return NextResponse.json(
-        { error: "Arquivo ou usuário ausente" },
+        { error: "Texto ou usuário ausente" },
         { status: 400 }
       );
     }
 
-    /* =========================
-       2️⃣ USER → UUID
-    ========================= */
     const { data: profile } = await supabase
       .from("profiles")
       .select("id")
-      .eq("email", userEmail)
+      .eq("email", user_email)
       .single();
 
     if (!profile) {
       return NextResponse.json(
-        { error: "Usuário não encontrado no profiles" },
+        { error: "Usuário não encontrado" },
         { status: 400 }
       );
     }
 
     const userId = profile.id;
 
-    /* =========================
-       3️⃣ PDFJS v5 (ÚNICA FORMA CORRETA)
-    ========================= */
-    let rawText = "";
-
-    try {
-      const pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
-
-      const buffer = Buffer.from(await file.arrayBuffer());
-
-      const pdf = await pdfjsLib.getDocument({
-        data: buffer,
-        disableFontFace: true,
-      }).promise;
-
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-
-        rawText += content.items.map(i => i.str || "").join(" ") + "\n";
-      }
-    } catch (err) {
-      console.error("PDFJS ERROR:", err);
-      return NextResponse.json(
-        { error: "Erro ao extrair texto do PDF" },
-        { status: 400 }
-      );
-    }
-
-    if (!rawText.trim()) {
-      return NextResponse.json(
-        { error: "PDF não contém texto legível" },
-        { status: 400 }
-      );
-    }
-
-    /* =========================
-       4️⃣ SAVE SCHEDULE
-    ========================= */
     const { data: schedule } = await supabase
       .from("schedules")
       .insert({
         user_id: userId,
-        raw_text: rawText,
+        raw_text,
         processed: false,
       })
       .select()
       .single();
 
-    /* =========================
-       5️⃣ OPENAI
-    ========================= */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
@@ -104,7 +54,7 @@ export async function POST(req) {
         {
           role: "system",
           content: `
-Extraia apenas pernoites da escala.
+Extraia APENAS os pernoites da escala.
 Retorne SOMENTE JSON no formato:
 
 [
@@ -116,7 +66,7 @@ Retorne SOMENTE JSON no formato:
 ]
           `,
         },
-        { role: "user", content: rawText },
+        { role: "user", content: raw_text },
       ],
     });
 
@@ -138,9 +88,8 @@ Retorne SOMENTE JSON no formato:
       .eq("id", schedule.id);
 
     return NextResponse.json({ success: true });
-
   } catch (e) {
-    console.error("process-scale error:", e);
+    console.error(e);
     return NextResponse.json(
       { error: "Erro ao processar escala" },
       { status: 500 }
