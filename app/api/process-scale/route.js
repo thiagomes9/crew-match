@@ -97,15 +97,23 @@ Retorne SOMENTE JSON válido no formato:
 
     let stays;
 
-    try {
-      stays = JSON.parse(completion.choices[0].message.content);
-    } catch (e) {
-      console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
-      return NextResponse.json(
-        { error: "Resposta inválida da IA" },
-        { status: 500 }
-      );
-    }
+try {
+  let raw = completion.choices[0].message.content;
+
+  // remover markdown ```json ```
+  raw = raw
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  stays = JSON.parse(raw);
+} catch (e) {
+  console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
+  return NextResponse.json(
+    { error: "Resposta inválida da IA" },
+    { status: 500 }
+  );
+}
 
     if (!Array.isArray(stays) || stays.length === 0) {
       return NextResponse.json(
