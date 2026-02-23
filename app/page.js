@@ -1,10 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getDocument } from "pdfjs-dist";
-
-// obrigatório para pdfjs no browser
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 export default function Home() {
   const [file, setFile] = useState(null);
@@ -72,23 +68,27 @@ export default function Home() {
   }
 
   /* =========================
-     EXTRACT PDF TEXT (BROWSER)
+     EXTRACT PDF TEXT (BROWSER ONLY)
   ========================= */
-async function extractTextFromPdf(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await getDocument({ data: arrayBuffer }).promise;
+  async function extractTextFromPdf(file) {
+    // ⚠️ IMPORT DINÂMICO (só no browser)
+    const pdfjs = await import("pdfjs-dist");
 
-  let text = "";
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
+    let text = "";
 
-    text += content.items.map(item => item.str || "").join(" ") + "\n";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+
+      text += content.items.map(item => item.str || "").join(" ") + "\n";
+    }
+
+    return text;
   }
 
-  return text;
-}
   /* =========================
      PROCESS SCALE (IA)
   ========================= */
@@ -101,12 +101,11 @@ async function extractTextFromPdf(file) {
     setLoading(true);
 
     try {
-      // 1️⃣ extrair texto no frontend
+      // 1️⃣ extrair texto no browser
       const rawText = await extractTextFromPdf(file);
 
       if (!rawText.trim()) {
         alert("Não foi possível extrair texto do PDF");
-        setLoading(false);
         return;
       }
 
@@ -124,7 +123,6 @@ async function extractTextFromPdf(file) {
 
       if (!res.ok) {
         alert(data.error || "Erro ao processar escala");
-        setLoading(false);
         return;
       }
 
