@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ⚠️ Service Role é necessário aqui (API server-side)
+// Service role (API server-side)
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -20,7 +21,7 @@ export async function POST(req) {
     const formData = await req.formData();
     const file = formData.get("file");
 
-    // ⚠️ por enquanto o frontend envia email
+    // frontend ainda envia email (MVP)
     const userEmail = formData.get("user_id");
 
     if (!file || !userEmail) {
@@ -50,29 +51,37 @@ export async function POST(req) {
     const userId = profile.id;
 
     /* =========================
-       3️⃣ LER PDF (pdf-parse)
+       3️⃣ LER PDF COM PDF.JS
     ========================= */
-    // require é necessário por causa do Turbopack
     let rawText = "";
 
-try {
-  const { default: pdfParse } = await import("pdf-parse");
+    try {
+      const buffer = Buffer.from(await file.arrayBuffer());
 
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const pdfData = await pdfParse(buffer);
+      const loadingTask = pdfjsLib.getDocument({ data: buffer });
+      const pdf = await loadingTask.promise;
 
-  rawText = pdfData.text || "";
-} catch (e) {
-  console.error("PDF PARSE ERROR:", e);
-  return NextResponse.json(
-    { error: "Erro ao ler o PDF da escala" },
-    { status: 400 }
-  );
-}
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const content = await page.getTextContent();
+
+        const pageText = content.items
+          .map((item) => item.str)
+          .join(" ");
+
+        rawText += pageText + "\n";
+      }
+    } catch (e) {
+      console.error("PDFJS ERROR:", e);
+      return NextResponse.json(
+        { error: "Erro ao extrair texto do PDF" },
+        { status: 400 }
+      );
+    }
 
     if (!rawText || rawText.trim().length === 0) {
       return NextResponse.json(
-        { error: "Não foi possível extrair texto do PDF" },
+        { error: "PDF não contém texto legível" },
         { status: 400 }
       );
     }
