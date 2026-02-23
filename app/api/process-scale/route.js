@@ -6,7 +6,6 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Service role (server-side only)
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -15,12 +14,10 @@ const supabase = createClient(
 export async function POST(req) {
   try {
     /* =========================
-       1️⃣ LER FORMDATA
+       1️⃣ FORM DATA
     ========================= */
     const formData = await req.formData();
     const file = formData.get("file");
-
-    // MVP: frontend envia email
     const userEmail = formData.get("user_id");
 
     if (!file || !userEmail) {
@@ -31,16 +28,15 @@ export async function POST(req) {
     }
 
     /* =========================
-       2️⃣ RESOLVER USER_ID (UUID)
+       2️⃣ USER → UUID
     ========================= */
-    const { data: profile, error: profileError } = await supabase
+    const { data: profile } = await supabase
       .from("profiles")
       .select("id")
       .eq("email", userEmail)
       .single();
 
-    if (profileError || !profile) {
-      console.error("profile error:", profileError);
+    if (!profile) {
       return NextResponse.json(
         { error: "Usuário não encontrado no profiles" },
         { status: 400 }
@@ -50,52 +46,45 @@ export async function POST(req) {
     const userId = profile.id;
 
     /* =========================
-   3️⃣ LER PDF COM PDF.JS (v5.x – NODE SAFE)
-========================= */
-let rawText = "";
+       3️⃣ PDFJS v5 (ÚNICA FORMA CORRETA)
+    ========================= */
+    let rawText = "";
 
-try {
-  // pdfjs-dist v5.x → usar build/pdf.mjs
-  const pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
+    try {
+      const pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
 
-  const buffer = Buffer.from(await file.arrayBuffer());
+      const buffer = Buffer.from(await file.arrayBuffer());
 
-  const loadingTask = pdfjsLib.getDocument({
-    data: buffer,
-    disableFontFace: true, // importante em Node
-  });
+      const pdf = await pdfjsLib.getDocument({
+        data: buffer,
+        disableFontFace: true,
+      }).promise;
 
-  const pdf = await loadingTask.promise;
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
 
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const content = await page.getTextContent();
+        rawText += content.items.map(i => i.str || "").join(" ") + "\n";
+      }
+    } catch (err) {
+      console.error("PDFJS ERROR:", err);
+      return NextResponse.json(
+        { error: "Erro ao extrair texto do PDF" },
+        { status: 400 }
+      );
+    }
 
-    const pageText = content.items
-      .map((item) => item.str || "")
-      .join(" ");
-
-    rawText += pageText + "\n";
-  }
-} catch (e) {
-  console.error("PDFJS ERROR:", e);
-  return NextResponse.json(
-    { error: "Erro ao extrair texto do PDF" },
-    { status: 400 }
-  );
-}
-
-if (!rawText || rawText.trim().length === 0) {
-  return NextResponse.json(
-    { error: "PDF não contém texto legível" },
-    { status: 400 }
-  );
-}
+    if (!rawText.trim()) {
+      return NextResponse.json(
+        { error: "PDF não contém texto legível" },
+        { status: 400 }
+      );
+    }
 
     /* =========================
-       4️⃣ CRIAR SCHEDULE
+       4️⃣ SAVE SCHEDULE
     ========================= */
-    const { data: schedule, error: scheduleError } = await supabase
+    const { data: schedule } = await supabase
       .from("schedules")
       .insert({
         user_id: userId,
@@ -105,13 +94,8 @@ if (!rawText || rawText.trim().length === 0) {
       .select()
       .single();
 
-    if (scheduleError) {
-      console.error("schedule error:", scheduleError);
-      throw scheduleError;
-    }
-
     /* =========================
-       5️⃣ OPENAI – EXTRAIR PERNOITES
+       5️⃣ OPENAI
     ========================= */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -120,9 +104,8 @@ if (!rawText || rawText.trim().length === 0) {
         {
           role: "system",
           content: `
-Você é um parser de escala aérea.
-Extraia APENAS os pernoites.
-Retorne SOMENTE JSON válido no formato:
+Extraia apenas pernoites da escala.
+Retorne SOMENTE JSON no formato:
 
 [
   {
@@ -133,63 +116,31 @@ Retorne SOMENTE JSON válido no formato:
 ]
           `,
         },
-        {
-          role: "user",
-          content: rawText,
-        },
+        { role: "user", content: rawText },
       ],
     });
 
-    let stays;
+    const stays = JSON.parse(completion.choices[0].message.content);
 
-    try {
-      stays = JSON.parse(completion.choices[0].message.content);
-    } catch (e) {
-      console.error(
-        "OpenAI raw response:",
-        completion.choices[0].message.content
-      );
-      throw new Error("Resposta da OpenAI não é JSON válido");
-    }
-
-    if (!Array.isArray(stays) || stays.length === 0) {
-      return NextResponse.json(
-        { error: "Nenhum pernoite encontrado na escala" },
-        { status: 400 }
-      );
-    }
-
-    /* =========================
-       6️⃣ INSERIR STAYS
-    ========================= */
-    const formattedStays = stays.map((stay) => ({
+    const formatted = stays.map(s => ({
       user_id: userId,
-      city: stay.city,
-      check_in: stay.check_in,
-      check_out: stay.check_out,
+      city: s.city,
+      check_in: s.check_in,
+      check_out: s.check_out,
       schedule_id: schedule.id,
     }));
 
-    const { error: staysError } = await supabase
-      .from("stays")
-      .insert(formattedStays);
+    await supabase.from("stays").insert(formatted);
 
-    if (staysError) {
-      console.error("stays error:", staysError);
-      throw staysError;
-    }
-
-    /* =========================
-       7️⃣ MARCAR SCHEDULE COMO PROCESSADO
-    ========================= */
     await supabase
       .from("schedules")
       .update({ processed: true })
       .eq("id", schedule.id);
 
     return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error("process-scale error:", error);
+
+  } catch (e) {
+    console.error("process-scale error:", e);
     return NextResponse.json(
       { error: "Erro ao processar escala" },
       { status: 500 }
