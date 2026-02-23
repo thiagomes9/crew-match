@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import * as pdfjsLib from "pdfjs-dist/build/pdf.mjs";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Service role (API server-side)
+// Service role (server-side only)
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -51,13 +50,15 @@ export async function POST(req) {
     const userId = profile.id;
 
     /* =========================
-       3️⃣ LER PDF COM PDF.JS
+       3️⃣ LER PDF COM PDF.JS (LEGACY – NODE SAFE)
     ========================= */
     let rawText = "";
 
     try {
-      const buffer = Buffer.from(await file.arrayBuffer());
+      // ⚠️ IMPORTANTE: require dentro da função
+      const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 
+      const buffer = Buffer.from(await file.arrayBuffer());
       const loadingTask = pdfjsLib.getDocument({ data: buffer });
       const pdf = await loadingTask.promise;
 
@@ -72,7 +73,7 @@ export async function POST(req) {
         rawText += pageText + "\n";
       }
     } catch (e) {
-      console.error("PDFJS ERROR:", e);
+      console.error("PDFJS LEGACY ERROR:", e);
       return NextResponse.json(
         { error: "Erro ao extrair texto do PDF" },
         { status: 400 }
