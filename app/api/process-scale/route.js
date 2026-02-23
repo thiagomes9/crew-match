@@ -53,11 +53,22 @@ export async function POST(req) {
        3️⃣ LER PDF (pdf-parse)
     ========================= */
     // require é necessário por causa do Turbopack
-    const pdfParse = require("pdf-parse");
+    let rawText = "";
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const pdfData = await pdfParse(buffer);
-    const rawText = pdfData.text;
+try {
+  const { default: pdfParse } = await import("pdf-parse");
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const pdfData = await pdfParse(buffer);
+
+  rawText = pdfData.text || "";
+} catch (e) {
+  console.error("PDF PARSE ERROR:", e);
+  return NextResponse.json(
+    { error: "Erro ao ler o PDF da escala" },
+    { status: 400 }
+  );
+}
 
     if (!rawText || rawText.trim().length === 0) {
       return NextResponse.json(
