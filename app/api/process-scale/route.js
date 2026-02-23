@@ -1,13 +1,7 @@
 import { NextResponse } from "next/server";
+import pdf from "pdf-parse";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import { notifyMatches } from "@/lib/notifyMatches";
-
-export const runtime = "nodejs";
-
-/* =========================
-   CLIENTES
-========================= */
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -15,167 +9,96 @@ const openai = new OpenAI({
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY // necessário para inserir com RLS
 );
-
-/* =========================
-   POST /api/process-scale
-========================= */
 
 export async function POST(req) {
   try {
-    console.log("API process-scale chamada");
+    const formData = await req.formData();
+    const file = formData.get("file");
+    const userId = formData.get("user_id");
 
-    const { filePath, user_email } = await req.json();
-
-    if (!filePath || !user_email) {
+    if (!file || !userId) {
       return NextResponse.json(
-        { error: "filePath e user_email são obrigatórios" },
+        { error: "Arquivo ou usuário ausente" },
         { status: 400 }
       );
     }
 
-    /* =========================
-       1️⃣ Baixar PDF
-    ========================= */
-
-    const { data: file, error } = await supabase
-      .storage
-      .from("schedules")
-      .download(filePath);
-
-    if (error || !file) {
-      console.error("Erro download:", error);
-      return NextResponse.json(
-        { error: "Erro ao baixar PDF" },
-        { status: 500 }
-      );
-    }
-
+    /* 1️⃣ Ler PDF */
     const buffer = Buffer.from(await file.arrayBuffer());
-    console.log("PDF baixado do Storage");
+    const pdfData = await pdf(buffer);
+    const rawText = pdfData.text;
 
-    /* =========================
-       2️⃣ Upload para OpenAI
-    ========================= */
+    /* 2️⃣ Criar schedule */
+    const { data: schedule, error: scheduleError } = await supabase
+      .from("schedules")
+      .insert({
+        user_id: userId,
+        raw_text: rawText,
+        processed: false,
+      })
+      .select()
+      .single();
 
-    const uploaded = await openai.files.create({
-      file: new File([buffer], "escala.pdf", {
-        type: "application/pdf",
-      }),
-      purpose: "assistants",
-    });
+    if (scheduleError) throw scheduleError;
 
-    console.log("PDF enviado para OpenAI:", uploaded.id);
+    /* 3️⃣ Chamar OpenAI (somente para pernoites) */
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `
+Você é um parser de escala aérea.
+Extraia APENAS os pernoites.
+Retorne SOMENTE JSON válido no formato:
 
-    /* =========================
-       3️⃣ Extração com IA
-    ========================= */
-
-    const response = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
+[
+  {
+    "city": "string",
+    "check_in": "YYYY-MM-DDTHH:mm",
+    "check_out": "YYYY-MM-DDTHH:mm"
+  }
+]
+          `,
+        },
         {
           role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: `
-Extraia APENAS os pernoites deste PDF.
-
-Formato EXATO:
-[
-  { "city": "GRU", "date": "YYYY-MM-DD" }
-]
-
-Regras:
-- Apenas JSON
-- Sem explicações
-- Cidade em IATA
-              `,
-            },
-            {
-              type: "input_file",
-              file_id: uploaded.id,
-            },
-          ],
+          content: rawText,
         },
       ],
     });
 
-    let rawText =
-      response.output_text ||
-      response.output?.[0]?.content?.[0]?.text ||
-      "";
+    const stays = JSON.parse(completion.choices[0].message.content);
 
-    console.log("Resposta bruta da IA:", rawText);
-
-    /* =========================
-       4️⃣ LIMPEZA CRÍTICA (FIX)
-    ========================= */
-
-    rawText = rawText
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
-
-    let stays;
-    try {
-      stays = JSON.parse(rawText);
-    } catch (e) {
-      console.error("JSON inválido:", rawText);
-      return NextResponse.json(
-        { error: "IA retornou JSON inválido", rawText },
-        { status: 500 }
-      );
-    }
-
-    if (!Array.isArray(stays) || stays.length === 0) {
-      return NextResponse.json(
-        { error: "Nenhum pernoite encontrado" },
-        { status: 400 }
-      );
-    }
-
-    /* =========================
-       5️⃣ Salvar pernoites
-    ========================= */
-
-    const inserts = stays.map(s => ({
-      city: s.city.toUpperCase(),
-      date: s.date,
-      user_email,
+    /* 4️⃣ Inserir pernoites */
+    const formattedStays = stays.map((stay) => ({
+      user_id: userId,
+      city: stay.city,
+      check_in: stay.check_in,
+      check_out: stay.check_out,
+      schedule_id: schedule.id,
     }));
 
-    const { error: insertError } = await supabase
+    const { error: staysError } = await supabase
       .from("stays")
-      .insert(inserts);
+      .insert(formattedStays);
 
-    if (insertError) {
-      console.error(insertError);
-      return NextResponse.json(
-        { error: "Erro ao salvar pernoites" },
-        { status: 500 }
-      );
-    }
+    if (staysError) throw staysError;
 
-    console.log("Pernoites salvos:", inserts.length);
+    /* 5️⃣ Marcar schedule como processado */
+    await supabase
+      .from("schedules")
+      .update({ processed: true })
+      .eq("id", schedule.id);
 
-    /* =========================
-       6️⃣ Notificações
-    ========================= */
-
-    await notifyMatches(stays);
-
-    return NextResponse.json({
-      ok: true,
-      pernoites: stays.length,
-    });
-
-  } catch (err) {
-    console.error("Erro process-scale:", err);
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("process-scale error:", error);
     return NextResponse.json(
-      { error: "Erro interno process-scale" },
+      { error: "Erro ao processar escala" },
       { status: 500 }
     );
   }
