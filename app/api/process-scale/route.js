@@ -92,13 +92,13 @@ export async function POST(req) {
     /* =========================
        5️⃣ INSERIR STAYS
     ========================= */
-    const formattedStays = stays.map((s) => ({
-      user_id: userId,
-      city: s.city,
-      check_in: s.check_in,
-      check_out: s.check_out,
-      schedule_id: schedule.id,
-    }));
+   const formattedStays = stays.map((s) => ({
+  user_id: userId,
+  user_email,
+  city: s.city,
+  check_in: s.check_in,
+  check_out: s.check_out,
+}));
 
     const { error: staysError } = await supabase
       .from("stays")
