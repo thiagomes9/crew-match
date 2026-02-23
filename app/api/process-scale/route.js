@@ -34,11 +34,11 @@ export async function POST(req) {
     }
 
     /* =========================
-       2️⃣ USUÁRIO
+       2️⃣ USUÁRIO + BASE
     ========================= */
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
-      .select("id")
+      .select("id, base")
       .eq("email", user_email)
       .single();
 
@@ -50,7 +50,17 @@ export async function POST(req) {
       );
     }
 
+    if (!profile.base) {
+      return NextResponse.json(
+        { error: "Base operacional não cadastrada no perfil" },
+        { status: 400 }
+      );
+    }
+
     const userId = profile.id;
+    const userBase = profile.base;
+
+    console.log("👤 user:", userId, "| base:", userBase);
 
     /* =========================
        3️⃣ SCHEDULE
@@ -72,7 +82,7 @@ export async function POST(req) {
     }
 
     /* =========================
-       4️⃣ OPENAI
+       4️⃣ OPENAI (BASE DINÂMICA)
     ========================= */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -81,18 +91,29 @@ export async function POST(req) {
         {
           role: "system",
           content: `
-Você é um parser de escala aérea.
-Extraia APENAS pernoites reais.
+Você é um especialista em escalas aéreas no padrão AIMS.
 
-Considere pernoite somente quando:
-- houver permanência mínima de 6 horas
+Base do tripulante: ${userBase}.
+
+Extraia APENAS pernoites reais (hotel).
+
+Considere pernoite SOMENTE quando:
+- a cidade for DIFERENTE da base (${userBase})
+- o tripulante terminar o dia nessa cidade
+- o dia seguinte iniciar nessa mesma cidade
 - a permanência atravesse a madrugada
+- duração mínima de 6 horas
+
+NÃO considere pernoite:
+- períodos em base
+- eventos DO, DR, OFF, HSB, HSBE, ASB
+- repousos administrativos
 
 Retorne SOMENTE JSON válido no formato:
 
 [
   {
-    "city": "GRU",
+    "city": "MCZ",
     "check_in": "YYYY-MM-DDTHH:mm",
     "check_out": "YYYY-MM-DDTHH:mm"
   }
@@ -110,7 +131,7 @@ NÃO use \`\`\`json.
     });
 
     /* =========================
-       5️⃣ PARSE JSON (ROBUSTO)
+       5️⃣ PARSE JSON ROBUSTO
     ========================= */
     let stays;
 
@@ -142,10 +163,13 @@ NÃO use \`\`\`json.
     }
 
     /* =========================
-       6️⃣ FILTRO DE PERNOITES
+       6️⃣ FILTRO FINAL (BASE DINÂMICA)
     ========================= */
     const filteredStays = stays.filter((s) => {
       if (!s.check_in || !s.check_out || !s.city) return false;
+
+      // ❌ nunca pernoite em base do usuário
+      if (s.city === userBase) return false;
 
       const start = new Date(s.check_in);
       const end = new Date(s.check_out);
@@ -172,7 +196,7 @@ NÃO use \`\`\`json.
        7️⃣ FORMATAR STAYS
     ========================= */
     const formattedStays = filteredStays.map((s) => {
-      const date = s.check_in.split("T")[0]; // YYYY-MM-DD
+      const date = s.check_in.split("T")[0];
 
       return {
         user_id: userId,
