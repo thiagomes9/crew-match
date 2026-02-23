@@ -68,11 +68,15 @@ export default function Home() {
   }
 
   /* =========================
-     EXTRACT PDF TEXT (BROWSER ONLY)
+     EXTRACT PDF TEXT (BROWSER SAFE)
   ========================= */
   async function extractTextFromPdf(file) {
-    // ⚠️ IMPORT DINÂMICO (só no browser)
-    const pdfjs = await import("pdfjs-dist");
+    // carregar pdfjs dinamicamente (apenas no browser)
+    const pdfjs = await import("pdfjs-dist/build/pdf");
+    const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs");
+
+    // configurar worker (OBRIGATÓRIO)
+    pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
 
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
@@ -93,6 +97,8 @@ export default function Home() {
      PROCESS SCALE (IA)
   ========================= */
   async function processScale() {
+    console.log("🚀 processScale chamado");
+
     if (!file) {
       alert("Selecione um arquivo PDF");
       return;
@@ -101,13 +107,15 @@ export default function Home() {
     setLoading(true);
 
     try {
-      // 1️⃣ extrair texto no browser
+      // 1️⃣ extrair texto do PDF no browser
       const rawText = await extractTextFromPdf(file);
 
       if (!rawText.trim()) {
         alert("Não foi possível extrair texto do PDF");
         return;
       }
+
+      console.log("📤 enviando POST /api/process-scale");
 
       // 2️⃣ enviar texto para o backend
       const res = await fetch("/api/process-scale", {
@@ -118,6 +126,8 @@ export default function Home() {
           user_email: userEmail,
         }),
       });
+
+      console.log("📥 resposta recebida", res.status);
 
       const data = await res.json();
 
