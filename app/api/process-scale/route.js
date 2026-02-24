@@ -13,6 +13,7 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
 /* =========================
    HELPERS
 ========================= */
@@ -29,7 +30,7 @@ function isValidStay({ city, check_in, check_out }) {
   // mínimo 6 horas
   if (diffHours < 6) return false;
 
-  // precisa cruzar dia
+  // precisa cruzar o dia
   if (inDate.toDateString() === outDate.toDateString()) {
     return false;
   }
@@ -37,9 +38,40 @@ function isValidStay({ city, check_in, check_out }) {
   return true;
 }
 
+function mergeConsecutiveStays(stays) {
+  if (!Array.isArray(stays) || stays.length === 0) return [];
+
+  const sorted = [...stays].sort(
+    (a, b) => new Date(a.check_in) - new Date(b.check_in)
+  );
+
+  const merged = [];
+  let current = { ...sorted[0] };
+
+  for (let i = 1; i < sorted.length; i++) {
+    const next = sorted[i];
+
+    const sameCity = next.city === current.city;
+
+    const gapHours =
+      (new Date(next.check_in) - new Date(current.check_out)) /
+      1000 / 60 / 60;
+
+    // mesma cidade + intervalo pequeno → unir
+    if (sameCity && gapHours <= 3) {
+      current.check_out = next.check_out;
+    } else {
+      merged.push(current);
+      current = { ...next };
+    }
+  }
+
+  merged.push(current);
+  return merged;
+}
+
 function safeJsonParse(text) {
   try {
-    // remove ```json ``` se existir
     const cleaned = text
       .replace(/```json/gi, "")
       .replace(/```/g, "")
@@ -116,12 +148,14 @@ ${raw_text}
     }
 
     /* =========================
-       FILTRO BACKEND
+       FILTRO + DEDUP
     ========================= */
-    const validStays = parsed.filter(isValidStay);
+    const validStays = mergeConsecutiveStays(
+      parsed.filter(isValidStay)
+    );
 
     console.log(
-      `🧠 IA retornou ${parsed.length} blocos — ${validStays.length} válidos`
+      `🧠 IA retornou ${parsed.length} blocos — ${validStays.length} após filtro`
     );
 
     if (validStays.length === 0) {
