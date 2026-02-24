@@ -24,8 +24,8 @@ function extractCitiesFromText(text) {
   return matches || [];
 }
 
-// Validação de pernoite (ABRANGENTE)
-function isValidStay({ check_in, check_out }) {
+// Filtro técnico inicial (captura blocos)
+function isTechnicalRest({ check_in, check_out }) {
   const inDate = new Date(check_in);
   const outDate = new Date(check_out);
 
@@ -33,11 +33,22 @@ function isValidStay({ check_in, check_out }) {
 
   const diffHours = (outDate - inDate) / 1000 / 60 / 60;
 
-  // mínimo 8 horas
-  return diffHours >= 8;
+  // mínimo técnico para não perder descanso fragmentado
+  return diffHours >= 3;
 }
 
-// Deduplicação por continuidade temporal
+// Regra operacional REAL
+function isOperationalOvernight({ check_in, check_out }) {
+  const diffHours =
+    (new Date(check_out) - new Date(check_in)) /
+    1000 /
+    60 /
+    60;
+
+  return diffHours >= 12;
+}
+
+// Deduplicação / união de descansos
 function mergeConsecutiveStays(stays) {
   if (!stays.length) return [];
 
@@ -59,6 +70,7 @@ function mergeConsecutiveStays(stays) {
       60 /
       60;
 
+    // continuidade operacional
     if (gapHours <= 3) {
       current.check_out = next.check_out;
     } else {
@@ -101,7 +113,7 @@ export async function POST(req) {
     console.log("🔥 process-scale iniciado");
 
     /* =========================
-       OPENAI — SÓ INTERVALOS
+       OPENAI — APENAS INTERVALOS
     ========================= */
     const prompt = `
 A partir do texto abaixo (escala de tripulante aéreo),
@@ -148,8 +160,8 @@ ${raw_text}
     const cities = extractCitiesFromText(raw_text);
     let cityCursor = cities.length - 1;
 
-    const staysWithCity = parsed
-      .filter(isValidStay)
+    const technicalRests = parsed
+      .filter(isTechnicalRest)
       .map((stay) => {
         const city = cities[cityCursor] || null;
         cityCursor = Math.max(0, cityCursor - 1);
@@ -162,15 +174,19 @@ ${raw_text}
       })
       .filter((s) => s.city);
 
-    const finalStays = mergeConsecutiveStays(staysWithCity);
+    /* =========================
+       AGRUPA + REGRA 12H
+    ========================= */
+    const merged = mergeConsecutiveStays(technicalRests);
+    const finalStays = merged.filter(isOperationalOvernight);
 
     console.log(
-      `🛏️ ${finalStays.length} pernoites identificados`
+      `🛏️ ${finalStays.length} pernoites operacionais identificados`
     );
 
     if (!finalStays.length) {
       return NextResponse.json({
-        message: "Nenhum pernoite identificado",
+        message: "Nenhum pernoite operacional identificado",
       });
     }
 
