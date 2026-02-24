@@ -6,16 +6,13 @@ import os from "os";
 import path from "path";
 
 /* =========================
-   CLIENTES GOOGLE
+   GOOGLE CLIENTS
 ========================= */
 const credentials = JSON.parse(
   process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
 );
 
-const visionClient = new vision.ImageAnnotatorClient({
-  credentials,
-});
-
+const visionClient = new vision.ImageAnnotatorClient({ credentials });
 const storage = new Storage({ credentials });
 
 const bucketName = process.env.GOOGLE_OCR_BUCKET;
@@ -42,12 +39,14 @@ export async function POST(req) {
       );
     }
 
-    // buffer do PDF
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // salvar temporariamente
     const fileName = `ocr/${Date.now()}-${file.name}`;
     const tmpPath = path.join(os.tmpdir(), fileName);
+
+    // 🔧 CORREÇÃO CRÍTICA: criar pasta /tmp/ocr
+    fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
+
     fs.writeFileSync(tmpPath, buffer);
 
     // upload para GCS
@@ -58,9 +57,6 @@ export async function POST(req) {
 
     const gcsUri = `gs://${bucketName}/${fileName}`;
 
-    /* =========================
-       OCR PDF (OBRIGATÓRIO GCS)
-    ========================= */
     const request = {
       requests: [
         {
@@ -68,9 +64,7 @@ export async function POST(req) {
             gcsSource: { uri: gcsUri },
             mimeType: "application/pdf",
           },
-          features: [
-            { type: "DOCUMENT_TEXT_DETECTION" }
-          ],
+          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
         },
       ],
     };
