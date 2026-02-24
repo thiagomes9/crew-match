@@ -17,9 +17,21 @@ const supabase = createClient(
 /* =========================
    HELPERS
 ========================= */
-function isValidStay({ city, check_in, check_out }) {
-  if (!city || !check_in || !check_out) return false;
 
+// extrai todas as siglas de aeroporto do texto
+function extractCitiesFromText(text) {
+  const matches = text.match(/\b[A-Z]{3}\b/g);
+  return matches || [];
+}
+
+// encontra a última cidade mencionada antes do índice
+function findCityBeforeIndex(text, index) {
+  const beforeText = text.slice(0, index);
+  const cities = extractCitiesFromText(beforeText);
+  return cities.length > 0 ? cities[cities.length - 1] : null;
+}
+
+function isValidStay({ check_in, check_out }) {
   const inDate = new Date(check_in);
   const outDate = new Date(check_out);
 
@@ -27,14 +39,12 @@ function isValidStay({ city, check_in, check_out }) {
 
   const diffHours = (outDate - inDate) / 1000 / 60 / 60;
 
-  // regra mais abrangente
-  if (diffHours < 8) return false;
-
-  return true;
+  // abordagem abrangente
+  return diffHours >= 8;
 }
 
 function mergeConsecutiveStays(stays) {
-  if (!Array.isArray(stays) || stays.length === 0) return [];
+  if (!stays.length) return [];
 
   const sorted = [...stays].sort(
     (a, b) => new Date(a.check_in) - new Date(b.check_in)
@@ -46,15 +56,15 @@ function mergeConsecutiveStays(stays) {
   for (let i = 1; i < sorted.length; i++) {
     const next = sorted[i];
 
-    const sameCity = next.city === current.city;
-
     const gapHours =
-  Math.abs(
-    new Date(next.check_in) - new Date(current.check_out)
-  ) / 1000 / 60 / 60;
+      Math.abs(
+        new Date(next.check_in) - new Date(current.check_out)
+      ) /
+      1000 /
+      60 /
+      60;
 
-    // mesma cidade + intervalo pequeno → unir
-    if (sameCity && gapHours <= 3) {
+    if (gapHours <= 3) {
       current.check_out = next.check_out;
     } else {
       merged.push(current);
@@ -72,10 +82,8 @@ function safeJsonParse(text) {
       .replace(/```json/gi, "")
       .replace(/```/g, "")
       .trim();
-
     return JSON.parse(cleaned);
-  } catch (e) {
-    console.error("❌ JSON inválido da IA:", text);
+  } catch {
     return null;
   }
 }
@@ -94,34 +102,29 @@ export async function POST(req) {
       );
     }
 
-    console.log("🔥 process-scale EXECUTADO", new Date().toISOString());
+    console.log("🔥 process-scale iniciado");
 
     /* =========================
-       OPENAI PROMPT
+       OPENAI — APENAS INTERVALOS
     ========================= */
     const prompt = `
-Você é um extrator técnico de dados.
+A partir do texto abaixo (escala de tripulante aéreo),
+extraia APENAS intervalos contínuos de tempo em que
+o tripulante NÃO está voando ou em serviço.
 
-A partir do texto abaixo (escala de tripulante aéreo), identifique APENAS
-intervalos contínuos de tempo em que o tripulante NÃO está voando ou em serviço.
+NÃO inclua cidade.
+NÃO explique nada.
 
-REGRAS IMPORTANTES:
-- NÃO decida se é pernoite ou não
-- NÃO filtre por base
-- NÃO deduza hotel
-- NÃO explique nada
-
-Retorne APENAS um JSON válido, no formato:
+Retorne APENAS JSON válido:
 
 [
   {
-    "city": "SIGLA_AEROPORTO",
     "check_in": "YYYY-MM-DDTHH:MM",
     "check_out": "YYYY-MM-DDTHH:MM"
   }
 ]
 
-Texto da escala:
+Texto:
 """
 ${raw_text}
 """
@@ -144,24 +147,38 @@ ${raw_text}
     }
 
     /* =========================
-       FILTRO + DEDUP
+       BACKEND DECIDE CIDADE
     ========================= */
-    const validStays = mergeConsecutiveStays(
-      parsed.filter(isValidStay)
-    );
+    const staysWithCity = parsed
+      .filter(isValidStay)
+      .map((stay) => {
+        const idx = raw_text.indexOf(stay.check_in.split("T")[0]);
+        const city = findCityBeforeIndex(raw_text, idx);
+
+        return {
+          city,
+          check_in: stay.check_in,
+          check_out: stay.check_out,
+        };
+      })
+      .filter((s) => s.city);
+
+    const finalStays = mergeConsecutiveStays(staysWithCity);
 
     console.log(
-      `🧠 IA retornou ${parsed.length} blocos — ${validStays.length} após filtro`
+      `🛏️ ${finalStays.length} pernoites identificados`
     );
 
-    if (validStays.length === 0) {
-      return NextResponse.json({ message: "Nenhum pernoite válido" });
+    if (!finalStays.length) {
+      return NextResponse.json({
+        message: "Nenhum pernoite identificado",
+      });
     }
 
     /* =========================
        INSERT STAYS
     ========================= */
-    const inserts = validStays.map((s) => ({
+    const inserts = finalStays.map((s) => ({
       city: s.city,
       check_in: s.check_in,
       check_out: s.check_out,
@@ -184,7 +201,7 @@ ${raw_text}
   } catch (err) {
     console.error("❌ process-scale error:", err);
     return NextResponse.json(
-      { error: "Erro interno no process-scale" },
+      { error: "Erro interno" },
       { status: 500 }
     );
   }
