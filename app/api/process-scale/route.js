@@ -18,82 +18,25 @@ const supabase = createClient(
    HELPERS
 ========================= */
 
-// Extrai todas as siglas de aeroporto do texto OCR
-function extractCitiesFromText(text) {
-  const matches = text.match(/\b[A-Z]{3}\b/g);
-  return matches || [];
+// extrai siglas de aeroporto
+function extractCities(text) {
+  return text.match(/\b[A-Z]{3}\b/g) || [];
 }
 
-// Filtro técnico inicial (captura blocos)
-function isTechnicalRest({ check_in, check_out }) {
-  const inDate = new Date(check_in);
-  const outDate = new Date(check_out);
-
-  if (isNaN(inDate) || isNaN(outDate)) return false;
-
-  const diffHours = (outDate - inDate) / 1000 / 60 / 60;
-
-  // mínimo técnico para não perder descanso fragmentado
-  return diffHours >= 3;
-}
-
-// Regra operacional REAL
-function isOperationalOvernight({ check_in, check_out }) {
-  const diffHours =
-    (new Date(check_out) - new Date(check_in)) /
-    1000 /
-    60 /
-    60;
-
-  return diffHours >= 12;
-}
-
-// Deduplicação / união de descansos
-function mergeConsecutiveStays(stays) {
-  if (!stays.length) return [];
-
-  const sorted = [...stays].sort(
-    (a, b) => new Date(a.check_in) - new Date(b.check_in)
-  );
-
-  const merged = [];
-  let current = { ...sorted[0] };
-
-  for (let i = 1; i < sorted.length; i++) {
-    const next = sorted[i];
-
-    const gapHours =
-      Math.abs(
-        new Date(next.check_in) - new Date(current.check_out)
-      ) /
-      1000 /
-      60 /
-      60;
-
-    // continuidade operacional
-    if (gapHours <= 3) {
-      current.check_out = next.check_out;
-    } else {
-      merged.push(current);
-      current = { ...next };
-    }
-  }
-
-  merged.push(current);
-  return merged;
-}
-
-// Parse seguro do JSON da IA
+// parse seguro
 function safeJsonParse(text) {
   try {
-    const cleaned = text
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
-    return JSON.parse(cleaned);
+    return JSON.parse(
+      text.replace(/```json|```/g, "").trim()
+    );
   } catch {
     return null;
   }
+}
+
+// diferença em horas
+function diffHours(a, b) {
+  return (b - a) / 1000 / 60 / 60;
 }
 
 /* =========================
@@ -110,25 +53,32 @@ export async function POST(req) {
       );
     }
 
-    console.log("🔥 process-scale iniciado");
+    console.log("🔥 process-scale (EVENTOS) iniciado");
 
     /* =========================
-       OPENAI — APENAS INTERVALOS
+       OPENAI — EXTRAI EVENTOS
     ========================= */
     const prompt = `
-A partir do texto abaixo (escala de tripulante aéreo),
-extraia APENAS intervalos contínuos de tempo em que
-o tripulante NÃO está voando ou em serviço.
+Você é um extrator técnico de eventos de escala aérea.
 
-NÃO inclua cidade.
+A partir do texto abaixo (escala OCR), identifique APENAS
+eventos de INÍCIO e FIM de jornada.
+
+Para cada evento, retorne:
+- type: "start" ou "end"
+- datetime: no formato YYYY-MM-DDTHH:MM
+- city: cidade associada ao evento
+
+NÃO calcule descanso.
 NÃO explique nada.
 
 Retorne APENAS JSON válido:
 
 [
   {
-    "check_in": "YYYY-MM-DDTHH:MM",
-    "check_out": "YYYY-MM-DDTHH:MM"
+    "type": "end",
+    "datetime": "YYYY-MM-DDTHH:MM",
+    "city": "SIGLA"
   }
 ]
 
@@ -145,47 +95,57 @@ ${raw_text}
     });
 
     const aiText = completion.choices[0]?.message?.content || "";
-    const parsed = safeJsonParse(aiText);
-    console.log("🧠 IA retornou:", JSON.stringify(parsed, null, 2));
+    const events = safeJsonParse(aiText);
 
-    if (!Array.isArray(parsed)) {
-      return NextResponse.json(
-        { error: "Resposta inválida da IA" },
-        { status: 500 }
-      );
+    console.log("🧠 IA eventos:", events);
+
+    if (!Array.isArray(events) || events.length < 2) {
+      return NextResponse.json({
+        message: "Eventos insuficientes para cálculo",
+      });
     }
 
     /* =========================
-       BACKEND ASSOCIA CIDADE
+       ORDENA EVENTOS
     ========================= */
-    const cities = extractCitiesFromText(raw_text);
-    let cityCursor = cities.length - 1;
-
-    const technicalRests = parsed
-      .filter(isTechnicalRest)
-      .map((stay) => {
-        const city = cities[cityCursor] || null;
-        cityCursor = Math.max(0, cityCursor - 1);
-
-        return {
-          city,
-          check_in: stay.check_in,
-          check_out: stay.check_out,
-        };
-      })
-      .filter((s) => s.city);
+    const ordered = events
+      .filter((e) => e.type && e.datetime)
+      .sort(
+        (a, b) =>
+          new Date(a.datetime) - new Date(b.datetime)
+      );
 
     /* =========================
-       AGRUPA + REGRA 12H
+       CALCULA PERNOITES
     ========================= */
-    const merged = mergeConsecutiveStays(technicalRests);
-    const finalStays = merged.filter(isOperationalOvernight);
+    const stays = [];
+
+    for (let i = 0; i < ordered.length - 1; i++) {
+      const current = ordered[i];
+      const next = ordered[i + 1];
+
+      if (current.type === "end" && next.type === "start") {
+        const start = new Date(current.datetime);
+        const end = new Date(next.datetime);
+
+        const hours = diffHours(start, end);
+
+        if (hours >= 12) {
+          stays.push({
+            city: current.city,
+            check_in: current.datetime,
+            check_out: next.datetime,
+            user_email,
+          });
+        }
+      }
+    }
 
     console.log(
-      `🛏️ ${finalStays.length} pernoites operacionais identificados`
+      `🛏️ ${stays.length} pernoites operacionais calculados`
     );
 
-    if (!finalStays.length) {
+    if (!stays.length) {
       return NextResponse.json({
         message: "Nenhum pernoite operacional identificado",
       });
@@ -194,14 +154,7 @@ ${raw_text}
     /* =========================
        INSERT STAYS
     ========================= */
-    const inserts = finalStays.map((s) => ({
-      city: s.city,
-      check_in: s.check_in,
-      check_out: s.check_out,
-      user_email,
-    }));
-
-    const { error } = await supabase.from("stays").insert(inserts);
+    const { error } = await supabase.from("stays").insert(stays);
 
     if (error) {
       console.error("❌ staysError:", error);
@@ -212,7 +165,7 @@ ${raw_text}
     }
 
     return NextResponse.json({
-      inserted: inserts.length,
+      inserted: stays.length,
     });
   } catch (err) {
     console.error("❌ process-scale error:", err);
