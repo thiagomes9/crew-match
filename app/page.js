@@ -10,7 +10,7 @@ export default function Home() {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // MVP: usuário fixo
+  // MVP: usuário fixo (depois vem auth real)
   const userEmail = "joao@joao.com.br";
 
   /* =========================
@@ -68,39 +68,35 @@ export default function Home() {
   }
 
   /* =========================
-     EXTRACT PDF TEXT (BROWSER SAFE)
+     EXTRACT TEXT FROM PDF (BROWSER)
   ========================= */
   async function extractTextFromPdf(file) {
-  // carregar pdfjs dinamicamente (browser only)
-  const pdfjs = await import("pdfjs-dist/build/pdf");
+    const pdfjs = await import("pdfjs-dist/build/pdf");
 
-  // ⚠️ worker como URL (forma correta no v5)
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/build/pdf.worker.min.mjs",
-    import.meta.url
-  ).toString();
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url
+    ).toString();
 
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
-  let text = "";
+    let text = "";
 
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
 
-    text += content.items.map(item => item.str || "").join(" ") + "\n";
+      text += content.items.map(item => item.str || "").join(" ") + "\n";
+    }
+
+    return text;
   }
 
-  return text;
-}
-
   /* =========================
-     PROCESS SCALE (IA)
+     PROCESS SCALE (PDF + OCR)
   ========================= */
   async function processScale() {
-    console.log("🚀 processScale chamado");
-
     if (!file) {
       alert("Selecione um arquivo PDF");
       return;
@@ -109,17 +105,33 @@ export default function Home() {
     setLoading(true);
 
     try {
-      // 1️⃣ extrair texto do PDF no browser
-      const rawText = await extractTextFromPdf(file);
+      // 1️⃣ tentar extrair texto normalmente
+      let rawText = await extractTextFromPdf(file);
 
-      if (!rawText.trim()) {
-        alert("Não foi possível extrair texto do PDF");
-        return;
+      // 2️⃣ fallback OCR se necessário
+      if (!rawText || rawText.trim().length < 50) {
+        console.log("📸 PDF sem texto — usando OCR");
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const ocrRes = await fetch("/api/ocr", {
+          method: "POST",
+          body: formData,
+        });
+
+        const ocrData = await ocrRes.json();
+
+        if (!ocrRes.ok) {
+          alert("Não foi possível ler a escala (nem OCR).");
+          setLoading(false);
+          return;
+        }
+
+        rawText = ocrData.text;
       }
 
-      console.log("📤 enviando POST /api/process-scale");
-
-      // 2️⃣ enviar texto para o backend
+      // 3️⃣ enviar texto para backend / IA
       const res = await fetch("/api/process-scale", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -129,20 +141,19 @@ export default function Home() {
         }),
       });
 
-      console.log("📥 resposta recebida", res.status);
-
       const data = await res.json();
 
       if (!res.ok) {
         alert(data.error || "Erro ao processar escala");
+        setLoading(false);
         return;
       }
 
       await loadStays();
       await loadMatches();
-    } catch (e) {
-      console.error(e);
-      alert("Erro ao ler o PDF");
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao processar o PDF");
     } finally {
       setLoading(false);
     }
@@ -165,7 +176,7 @@ export default function Home() {
       />
       <br /><br />
       <button onClick={processScale} disabled={loading}>
-        {loading ? "Processando..." : "Enviar escala para IA"}
+        {loading ? "Processando..." : "Enviar escala"}
       </button>
 
       <hr />
@@ -192,7 +203,7 @@ export default function Home() {
       <ul>
         {stays.map((s, i) => (
           <li key={i}>
-            📍 {s.city} — {s.check_in || s.date}
+            📍 {s.city} — {s.date}
           </li>
         ))}
       </ul>
