@@ -1,20 +1,33 @@
 import { NextResponse } from "next/server";
 import vision from "@google-cloud/vision";
+import { Storage } from "@google-cloud/storage";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
-const client = new vision.ImageAnnotatorClient({
-  credentials: JSON.parse(
-    process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
-  ),
+/* =========================
+   CLIENTES GOOGLE
+========================= */
+const credentials = JSON.parse(
+  process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+);
+
+const visionClient = new vision.ImageAnnotatorClient({
+  credentials,
 });
 
+const storage = new Storage({ credentials });
+
+const bucketName = process.env.GOOGLE_OCR_BUCKET;
+
+/* =========================
+   OCR PDF ROUTE
+========================= */
 export async function POST(req) {
   try {
-    if (!process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+    if (!bucketName) {
       return NextResponse.json(
-        { error: "OCR não configurado no servidor" },
+        { error: "Bucket OCR não configurado" },
         { status: 500 }
       );
     }
@@ -29,27 +42,42 @@ export async function POST(req) {
       );
     }
 
-    // salvar PDF temporariamente
+    // buffer do PDF
     const buffer = Buffer.from(await file.arrayBuffer());
-    const tmpPdfPath = path.join(os.tmpdir(), `${Date.now()}.pdf`);
-    fs.writeFileSync(tmpPdfPath, buffer);
+
+    // salvar temporariamente
+    const fileName = `ocr/${Date.now()}-${file.name}`;
+    const tmpPath = path.join(os.tmpdir(), fileName);
+    fs.writeFileSync(tmpPath, buffer);
+
+    // upload para GCS
+    await storage.bucket(bucketName).upload(tmpPath, {
+      destination: fileName,
+      contentType: "application/pdf",
+    });
+
+    const gcsUri = `gs://${bucketName}/${fileName}`;
 
     /* =========================
-       OCR PDF (asyncBatch)
+       OCR PDF (OBRIGATÓRIO GCS)
     ========================= */
     const request = {
       requests: [
         {
           inputConfig: {
+            gcsSource: { uri: gcsUri },
             mimeType: "application/pdf",
-            content: buffer.toString("base64"),
           },
-          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+          features: [
+            { type: "DOCUMENT_TEXT_DETECTION" }
+          ],
         },
       ],
     };
 
-    const [operation] = await client.asyncBatchAnnotateFiles(request);
+    const [operation] =
+      await visionClient.asyncBatchAnnotateFiles(request);
+
     const [response] = await operation.promise();
 
     const pages =
