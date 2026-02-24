@@ -27,13 +27,8 @@ function isValidStay({ city, check_in, check_out }) {
 
   const diffHours = (outDate - inDate) / 1000 / 60 / 60;
 
-  // mínimo 6 horas
-  if (diffHours < 6) return false;
-
-  // precisa cruzar o dia
-  if (inDate.toDateString() === outDate.toDateString()) {
-    return false;
-  }
+  // regra mais abrangente
+  if (diffHours < 8) return false;
 
   return true;
 }
@@ -54,8 +49,9 @@ function mergeConsecutiveStays(stays) {
     const sameCity = next.city === current.city;
 
     const gapHours =
-      (new Date(next.check_in) - new Date(current.check_out)) /
-      1000 / 60 / 60;
+  Math.abs(
+    new Date(next.check_in) - new Date(current.check_out)
+  ) / 1000 / 60 / 60;
 
     // mesma cidade + intervalo pequeno → unir
     if (sameCity && gapHours <= 3) {
