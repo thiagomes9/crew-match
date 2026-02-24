@@ -146,6 +146,7 @@ ${raw_text}
 
     const aiText = completion.choices[0]?.message?.content || "";
     const parsed = safeJsonParse(aiText);
+    console.log("🧠 IA retornou:", JSON.stringify(parsed, null, 2));
 
     if (!Array.isArray(parsed)) {
       return NextResponse.json(
