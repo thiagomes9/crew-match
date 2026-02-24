@@ -21,8 +21,11 @@ const bucketName = process.env.GOOGLE_OCR_BUCKET;
    OCR PDF ROUTE
 ========================= */
 export async function POST(req) {
+  let tmpPath;
+
   try {
     if (!bucketName) {
+      console.error("❌ Bucket não configurado");
       return NextResponse.json(
         { error: "Bucket OCR não configurado" },
         { status: 500 }
@@ -39,23 +42,26 @@ export async function POST(req) {
       );
     }
 
+    console.log("📄 OCR iniciado");
+
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    const fileName = `ocr/${Date.now()}-${file.name}`;
-    const tmpPath = path.join(os.tmpdir(), fileName);
-
-    // 🔧 CORREÇÃO CRÍTICA: criar pasta /tmp/ocr
-    fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
+    // ✅ nome de arquivo seguro (sem espaços, sem pasta)
+    const safeName = `ocr-${Date.now()}.pdf`;
+    tmpPath = path.join(os.tmpdir(), safeName);
 
     fs.writeFileSync(tmpPath, buffer);
+    console.log("📁 PDF salvo em tmp:", tmpPath);
 
     // upload para GCS
     await storage.bucket(bucketName).upload(tmpPath, {
-      destination: fileName,
+      destination: safeName,
       contentType: "application/pdf",
     });
 
-    const gcsUri = `gs://${bucketName}/${fileName}`;
+    console.log("☁️ PDF enviado para GCS");
+
+    const gcsUri = `gs://${bucketName}/${safeName}`;
 
     const request = {
       requests: [
@@ -68,6 +74,8 @@ export async function POST(req) {
         },
       ],
     };
+
+    console.log("🔍 Chamando Google Vision OCR");
 
     const [operation] =
       await visionClient.asyncBatchAnnotateFiles(request);
@@ -92,12 +100,19 @@ export async function POST(req) {
       );
     }
 
+    console.log("✅ OCR concluído com sucesso");
+
     return NextResponse.json({ text });
   } catch (err) {
-    console.error("OCR PDF ERROR:", err);
+    console.error("❌ OCR PDF ERROR:", err);
     return NextResponse.json(
       { error: "Erro ao processar OCR PDF" },
       { status: 500 }
     );
+  } finally {
+    // 🧹 limpar arquivo temporário
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      fs.unlinkSync(tmpPath);
+    }
   }
 }
