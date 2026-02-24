@@ -25,7 +25,6 @@ export async function POST(req) {
 
   try {
     if (!bucketName) {
-      console.error("❌ Bucket não configurado");
       return NextResponse.json(
         { error: "Bucket OCR não configurado" },
         { status: 500 }
@@ -46,31 +45,37 @@ export async function POST(req) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // ✅ nome de arquivo seguro (sem espaços, sem pasta)
-    const safeName = `ocr-${Date.now()}.pdf`;
+    const safeName = `input-${Date.now()}.pdf`;
+    const outputPrefix = `ocr-output/${Date.now()}/`;
+
     tmpPath = path.join(os.tmpdir(), safeName);
-
     fs.writeFileSync(tmpPath, buffer);
-    console.log("📁 PDF salvo em tmp:", tmpPath);
 
-    // upload para GCS
+    // upload PDF
     await storage.bucket(bucketName).upload(tmpPath, {
       destination: safeName,
       contentType: "application/pdf",
     });
 
+    const gcsInputUri = `gs://${bucketName}/${safeName}`;
+    const gcsOutputUri = `gs://${bucketName}/${outputPrefix}`;
+
     console.log("☁️ PDF enviado para GCS");
 
-    const gcsUri = `gs://${bucketName}/${safeName}`;
-
+    /* =========================
+       OCR PDF (OBRIGATÓRIO)
+    ========================= */
     const request = {
       requests: [
         {
           inputConfig: {
-            gcsSource: { uri: gcsUri },
+            gcsSource: { uri: gcsInputUri },
             mimeType: "application/pdf",
           },
           features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+          outputConfig: {
+            gcsDestination: { uri: gcsOutputUri },
+          },
         },
       ],
     };
@@ -80,16 +85,28 @@ export async function POST(req) {
     const [operation] =
       await visionClient.asyncBatchAnnotateFiles(request);
 
-    const [response] = await operation.promise();
+    await operation.promise();
 
-    const pages =
-      response.responses?.[0]?.responses || [];
+    /* =========================
+       LER RESULTADO DO OCR
+    ========================= */
+    const [files] = await storage
+      .bucket(bucketName)
+      .getFiles({ prefix: outputPrefix });
 
     let text = "";
 
-    for (const page of pages) {
-      if (page.fullTextAnnotation?.text) {
-        text += page.fullTextAnnotation.text + "\n";
+    for (const file of files) {
+      if (!file.name.endsWith(".json")) continue;
+
+      const [content] = await file.download();
+      const json = JSON.parse(content.toString());
+
+      const pages = json.responses || [];
+      for (const page of pages) {
+        if (page.fullTextAnnotation?.text) {
+          text += page.fullTextAnnotation.text + "\n";
+        }
       }
     }
 
@@ -110,7 +127,6 @@ export async function POST(req) {
       { status: 500 }
     );
   } finally {
-    // 🧹 limpar arquivo temporário
     if (tmpPath && fs.existsSync(tmpPath)) {
       fs.unlinkSync(tmpPath);
     }
