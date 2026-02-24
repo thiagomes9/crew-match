@@ -3,242 +3,159 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
 /* =========================
-   CLIENTES
+   CLIENTS
 ========================= */
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 /* =========================
-   POST /api/process-scale
+   HELPERS
+========================= */
+function isValidStay({ city, check_in, check_out }) {
+  if (!city || !check_in || !check_out) return false;
+
+  const inDate = new Date(check_in);
+  const outDate = new Date(check_out);
+
+  if (isNaN(inDate) || isNaN(outDate)) return false;
+
+  const diffHours = (outDate - inDate) / 1000 / 60 / 60;
+
+  // mínimo 6 horas
+  if (diffHours < 6) return false;
+
+  // precisa cruzar dia
+  if (inDate.toDateString() === outDate.toDateString()) {
+    return false;
+  }
+
+  return true;
+}
+
+function safeJsonParse(text) {
+  try {
+    // remove ```json ``` se existir
+    const cleaned = text
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+
+    return JSON.parse(cleaned);
+  } catch (e) {
+    console.error("❌ JSON inválido da IA:", text);
+    return null;
+  }
+}
+
+/* =========================
+   ROUTE
 ========================= */
 export async function POST(req) {
-  console.log("🔥 process-scale EXECUTADO", new Date().toISOString());
-
   try {
-    /* =========================
-       1️⃣ BODY
-    ========================= */
     const { raw_text, user_email } = await req.json();
 
     if (!raw_text || !user_email) {
       return NextResponse.json(
-        { error: "Texto ou usuário ausente" },
+        { error: "raw_text ou user_email ausente" },
         { status: 400 }
       );
     }
 
-    /* =========================
-       2️⃣ USUÁRIO + BASE
-    ========================= */
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("id, base")
-      .eq("email", user_email)
-      .single();
-
-    if (profileError || !profile) {
-      console.error("❌ profileError:", profileError);
-      return NextResponse.json(
-        { error: "Usuário não encontrado" },
-        { status: 400 }
-      );
-    }
-
-    if (!profile.base) {
-      return NextResponse.json(
-        { error: "Base operacional não cadastrada no perfil" },
-        { status: 400 }
-      );
-    }
-
-    const userId = profile.id;
-    const userBase = profile.base;
-
-    console.log("👤 user:", userId, "| base:", userBase);
+    console.log("🔥 process-scale EXECUTADO", new Date().toISOString());
 
     /* =========================
-       3️⃣ SCHEDULE
+       OPENAI PROMPT
     ========================= */
-    const { error: scheduleError } = await supabase
-      .from("schedules")
-      .insert({
-        user_id: userId,
-        raw_text,
-        processed: false,
-      });
+    const prompt = `
+Você é um extrator técnico de dados.
 
-    if (scheduleError) {
-      console.error("❌ scheduleError:", scheduleError);
-      return NextResponse.json(
-        { error: "Erro ao criar schedule" },
-        { status: 500 }
-      );
-    }
+A partir do texto abaixo (escala de tripulante aéreo), identifique APENAS
+intervalos contínuos de tempo em que o tripulante NÃO está voando ou em serviço.
 
-    /* =========================
-       4️⃣ OPENAI (BASE DINÂMICA)
-    ========================= */
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: `
-Você é um especialista em escalas aéreas no padrão AIMS.
+REGRAS IMPORTANTES:
+- NÃO decida se é pernoite ou não
+- NÃO filtre por base
+- NÃO deduza hotel
+- NÃO explique nada
 
-Base do tripulante: ${userBase}.
-
-Extraia APENAS pernoites reais (hotel).
-
-Considere pernoite SOMENTE quando:
-- a cidade for DIFERENTE da base (${userBase})
-- o tripulante terminar o dia nessa cidade
-- o dia seguinte iniciar nessa mesma cidade
-- a permanência atravesse a madrugada
-- duração mínima de 6 horas
-
-NÃO considere pernoite:
-- períodos em base
-- eventos DO, DR, OFF, HSB, HSBE, ASB
-- repousos administrativos
-
-Retorne SOMENTE JSON válido no formato:
+Retorne APENAS um JSON válido, no formato:
 
 [
   {
-    "city": "MCZ",
-    "check_in": "YYYY-MM-DDTHH:mm",
-    "check_out": "YYYY-MM-DDTHH:mm"
+    "city": "SIGLA_AEROPORTO",
+    "check_in": "YYYY-MM-DDTHH:MM",
+    "check_out": "YYYY-MM-DDTHH:MM"
   }
 ]
 
-NÃO use markdown.
-NÃO use \`\`\`json.
-          `,
-        },
-        {
-          role: "user",
-          content: raw_text,
-        },
-      ],
+Texto da escala:
+"""
+${raw_text}
+"""
+`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [{ role: "user", content: prompt }],
     });
 
-    /* =========================
-       5️⃣ PARSE JSON ROBUSTO
-    ========================= */
-    let stays;
+    const aiText = completion.choices[0]?.message?.content || "";
+    const parsed = safeJsonParse(aiText);
 
-    try {
-      let raw = completion.choices[0].message.content;
-
-      raw = raw
-        .replace(/```json/gi, "")
-        .replace(/```/g, "")
-        .trim();
-
-      stays = JSON.parse(raw);
-    } catch (e) {
-      console.error(
-        "❌ JSON inválido da OpenAI:",
-        completion.choices[0].message.content
-      );
+    if (!Array.isArray(parsed)) {
       return NextResponse.json(
         { error: "Resposta inválida da IA" },
         { status: 500 }
       );
     }
 
-    if (!Array.isArray(stays)) {
+    /* =========================
+       FILTRO BACKEND
+    ========================= */
+    const validStays = parsed.filter(isValidStay);
+
+    console.log(
+      `🧠 IA retornou ${parsed.length} blocos — ${validStays.length} válidos`
+    );
+
+    if (validStays.length === 0) {
+      return NextResponse.json({ message: "Nenhum pernoite válido" });
+    }
+
+    /* =========================
+       INSERT STAYS
+    ========================= */
+    const inserts = validStays.map((s) => ({
+      city: s.city,
+      check_in: s.check_in,
+      check_out: s.check_out,
+      user_email,
+    }));
+
+    const { error } = await supabase.from("stays").insert(inserts);
+
+    if (error) {
+      console.error("❌ staysError:", error);
       return NextResponse.json(
-        { error: "Formato inesperado da IA" },
+        { error: "Erro ao inserir stays" },
         { status: 500 }
       );
     }
 
-    /* =========================
-       6️⃣ FILTRO FINAL (BASE DINÂMICA)
-    ========================= */
-    const filteredStays = stays.filter((s) => {
-      if (!s.check_in || !s.check_out || !s.city) return false;
-
-      // ❌ nunca pernoite em base do usuário
-      if (s.city === userBase) return false;
-
-      const start = new Date(s.check_in);
-      const end = new Date(s.check_out);
-
-      if (isNaN(start) || isNaN(end)) return false;
-
-      const hours = (end - start) / (1000 * 60 * 60);
-      const startHour = start.getHours();
-
-      return (
-        hours >= 6 &&
-        (startHour >= 18 || startHour <= 6)
-      );
+    return NextResponse.json({
+      inserted: inserts.length,
     });
-
-    if (filteredStays.length === 0) {
-      return NextResponse.json(
-        { error: "Nenhum pernoite válido encontrado" },
-        { status: 400 }
-      );
-    }
-
-    /* =========================
-       7️⃣ FORMATAR STAYS
-    ========================= */
-    const formattedStays = filteredStays.map((s) => {
-      const date = s.check_in.split("T")[0];
-
-      return {
-        user_id: userId,
-        user_email,
-        city: s.city,
-        date,
-        check_in: s.check_in,
-        check_out: s.check_out,
-      };
-    });
-
-    /* =========================
-       8️⃣ INSERIR STAYS
-    ========================= */
-    const { error: staysError } = await supabase
-      .from("stays")
-      .insert(formattedStays);
-
-    if (staysError) {
-      console.error("❌ staysError:", staysError);
-      return NextResponse.json(
-        { error: "Erro ao inserir pernoites" },
-        { status: 500 }
-      );
-    }
-
-    /* =========================
-       9️⃣ FINALIZAR
-    ========================= */
-    await supabase
-      .from("schedules")
-      .update({ processed: true })
-      .eq("user_id", userId)
-      .eq("processed", false);
-
-    console.log("✅ process-scale FINALIZADO");
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error("🔥 process-scale ERROR:", error);
+  } catch (err) {
+    console.error("❌ process-scale error:", err);
     return NextResponse.json(
-      { error: "Erro interno ao processar escala" },
+      { error: "Erro interno no process-scale" },
       { status: 500 }
     );
   }
