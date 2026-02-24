@@ -18,19 +18,13 @@ const supabase = createClient(
    HELPERS
 ========================= */
 
-// extrai todas as siglas de aeroporto do texto
+// Extrai todas as siglas de aeroporto do texto OCR
 function extractCitiesFromText(text) {
   const matches = text.match(/\b[A-Z]{3}\b/g);
   return matches || [];
 }
 
-// encontra a última cidade mencionada antes do índice
-function findCityBeforeIndex(text, index) {
-  const beforeText = text.slice(0, index);
-  const cities = extractCitiesFromText(beforeText);
-  return cities.length > 0 ? cities[cities.length - 1] : null;
-}
-
+// Validação de pernoite (ABRANGENTE)
 function isValidStay({ check_in, check_out }) {
   const inDate = new Date(check_in);
   const outDate = new Date(check_out);
@@ -39,10 +33,11 @@ function isValidStay({ check_in, check_out }) {
 
   const diffHours = (outDate - inDate) / 1000 / 60 / 60;
 
-  // abordagem abrangente
+  // mínimo 8 horas
   return diffHours >= 8;
 }
 
+// Deduplicação por continuidade temporal
 function mergeConsecutiveStays(stays) {
   if (!stays.length) return [];
 
@@ -76,6 +71,7 @@ function mergeConsecutiveStays(stays) {
   return merged;
 }
 
+// Parse seguro do JSON da IA
 function safeJsonParse(text) {
   try {
     const cleaned = text
@@ -105,7 +101,7 @@ export async function POST(req) {
     console.log("🔥 process-scale iniciado");
 
     /* =========================
-       OPENAI — APENAS INTERVALOS
+       OPENAI — SÓ INTERVALOS
     ========================= */
     const prompt = `
 A partir do texto abaixo (escala de tripulante aéreo),
@@ -147,13 +143,16 @@ ${raw_text}
     }
 
     /* =========================
-       BACKEND DECIDE CIDADE
+       BACKEND ASSOCIA CIDADE
     ========================= */
+    const cities = extractCitiesFromText(raw_text);
+    let cityCursor = cities.length - 1;
+
     const staysWithCity = parsed
       .filter(isValidStay)
       .map((stay) => {
-        const idx = raw_text.indexOf(stay.check_in.split("T")[0]);
-        const city = findCityBeforeIndex(raw_text, idx);
+        const city = cities[cityCursor] || null;
+        cityCursor = Math.max(0, cityCursor - 1);
 
         return {
           city,
