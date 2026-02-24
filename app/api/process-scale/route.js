@@ -15,28 +15,35 @@ const supabase = createClient(
 );
 
 /* =========================
+   CONFIG
+========================= */
+
+// lista fixa de aeroportos válidos (Brasil)
+const VALID_AIRPORTS = [
+  "GRU","CGH","VCP","GIG","BSB","CNF","SSA","REC","AJU",
+  "FOR","BEL","POA","CWB","FLN","NAT","MCZ","SLZ",
+  "JPA","THE","PMW","RAO","UDI","IOS","VIX","CPV"
+];
+
+/* =========================
    HELPERS
 ========================= */
 
-// extrai siglas de aeroporto
-function extractCities(text) {
-  return text.match(/\b[A-Z]{3}\b/g) || [];
-}
-
-// parse seguro
 function safeJsonParse(text) {
   try {
-    return JSON.parse(
-      text.replace(/```json|```/g, "").trim()
-    );
+    return JSON.parse(text.replace(/```json|```/g, "").trim());
   } catch {
     return null;
   }
 }
 
-// diferença em horas
 function diffHours(a, b) {
   return (b - a) / 1000 / 60 / 60;
+}
+
+function normalizeCity(city) {
+  if (!city) return null;
+  return city.trim().toUpperCase();
 }
 
 /* =========================
@@ -53,7 +60,7 @@ export async function POST(req) {
       );
     }
 
-    console.log("🔥 process-scale (EVENTOS) iniciado");
+    console.log("🔥 process-scale (EVENTOS + FILTRO)");
 
     /* =========================
        OPENAI — EXTRAI EVENTOS
@@ -61,26 +68,18 @@ export async function POST(req) {
     const prompt = `
 Você é um extrator técnico de eventos de escala aérea.
 
-A partir do texto abaixo (escala OCR), identifique APENAS
-eventos de INÍCIO e FIM de jornada.
+Extraia APENAS eventos de:
+- INÍCIO de jornada
+- FIM de jornada
 
 Para cada evento, retorne:
 - type: "start" ou "end"
-- datetime: no formato YYYY-MM-DDTHH:MM
-- city: cidade associada ao evento
+- datetime: YYYY-MM-DDTHH:MM
+- city: sigla do aeroporto (3 letras)
 
 NÃO calcule descanso.
 NÃO explique nada.
-
-Retorne APENAS JSON válido:
-
-[
-  {
-    "type": "end",
-    "datetime": "YYYY-MM-DDTHH:MM",
-    "city": "SIGLA"
-  }
-]
+Retorne APENAS JSON válido.
 
 Texto:
 """
@@ -97,26 +96,36 @@ ${raw_text}
     const aiText = completion.choices[0]?.message?.content || "";
     const events = safeJsonParse(aiText);
 
-    console.log("🧠 IA eventos:", events);
+    console.log("🧠 Eventos brutos da IA:", events);
 
     if (!Array.isArray(events) || events.length < 2) {
       return NextResponse.json({
-        message: "Eventos insuficientes para cálculo",
+        message: "Eventos insuficientes",
       });
     }
 
     /* =========================
-       ORDENA EVENTOS
+       NORMALIZA + ORDENA
     ========================= */
     const ordered = events
-      .filter((e) => e.type && e.datetime)
-      .sort(
-        (a, b) =>
-          new Date(a.datetime) - new Date(b.datetime)
-      );
+      .map((e) => ({
+        ...e,
+        city: normalizeCity(e.city),
+        date: new Date(e.datetime),
+      }))
+      .filter(
+        (e) =>
+          e.type &&
+          !isNaN(e.date) &&
+          e.city &&
+          VALID_AIRPORTS.includes(e.city)
+      )
+      .sort((a, b) => a.date - b.date);
+
+    console.log("📍 Eventos válidos:", ordered);
 
     /* =========================
-       CALCULA PERNOITES
+       CALCULA PERNOITES (≥12h)
     ========================= */
     const stays = [];
 
@@ -125,10 +134,7 @@ ${raw_text}
       const next = ordered[i + 1];
 
       if (current.type === "end" && next.type === "start") {
-        const start = new Date(current.datetime);
-        const end = new Date(next.datetime);
-
-        const hours = diffHours(start, end);
+        const hours = diffHours(current.date, next.date);
 
         if (hours >= 12) {
           stays.push({
@@ -141,9 +147,7 @@ ${raw_text}
       }
     }
 
-    console.log(
-      `🛏️ ${stays.length} pernoites operacionais calculados`
-    );
+    console.log(`🛏️ ${stays.length} pernoites válidos`);
 
     if (!stays.length) {
       return NextResponse.json({
@@ -159,7 +163,7 @@ ${raw_text}
     if (error) {
       console.error("❌ staysError:", error);
       return NextResponse.json(
-        { error: "Erro ao inserir stays" },
+        { error: "Erro ao inserir pernoites" },
         { status: 500 }
       );
     }
@@ -167,6 +171,7 @@ ${raw_text}
     return NextResponse.json({
       inserted: stays.length,
     });
+
   } catch (err) {
     console.error("❌ process-scale error:", err);
     return NextResponse.json(
