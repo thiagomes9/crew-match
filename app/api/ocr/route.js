@@ -4,14 +4,30 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-const client = new vision.ImageAnnotatorClient({
-  credentials: JSON.parse(
-    process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
-  ),
-});
+/* =========================
+   VALIDAR ENV
+========================= */
+if (!process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  console.error("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON não definida");
+}
+
+const client = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+  ? new vision.ImageAnnotatorClient({
+      credentials: JSON.parse(
+        process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+      ),
+    })
+  : null;
 
 export async function POST(req) {
   try {
+    if (!client) {
+      return NextResponse.json(
+        { error: "OCR não configurado no servidor" },
+        { status: 500 }
+      );
+    }
+
     const formData = await req.formData();
     const file = formData.get("file");
 
@@ -22,12 +38,10 @@ export async function POST(req) {
       );
     }
 
-    // salvar temporariamente no /tmp
     const buffer = Buffer.from(await file.arrayBuffer());
     const tmpPath = path.join(os.tmpdir(), `${Date.now()}.pdf`);
     fs.writeFileSync(tmpPath, buffer);
 
-    // OCR
     const [result] = await client.textDetection(tmpPath);
     const text = result.fullTextAnnotation?.text || "";
 
