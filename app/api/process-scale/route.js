@@ -129,7 +129,10 @@ ${raw_text}
     const aiText = completion.choices[0]?.message?.content || "";
     const events = safeJsonParse(aiText);
 
-    console.log("🧠 Eventos brutos da IA:", events);
+    console.log("🧠 EVENTOS ORDENADOS:");
+ordered.forEach(e => {
+  console.log(e.date.toISOString(), e.city, e.label);
+});
 
     if (!Array.isArray(events) || events.length < 2) {
       return NextResponse.json({
