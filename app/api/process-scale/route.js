@@ -162,24 +162,44 @@ ${raw_text}
     ========================= */
     const stays = [];
 
-    for (let i = 0; i < ordered.length - 1; i++) {
-      const current = ordered[i];
-      const next = ordered[i + 1];
 
-      const hours = diffHours(current.date, next.date);
+// agrupa eventos por dia (YYYY-MM-DD)
+const eventsByDay = {};
+for (const ev of ordered) {
+  const day = ev.date.toISOString().slice(0, 10);
+  if (!eventsByDay[day]) eventsByDay[day] = [];
+  eventsByDay[day].push(ev);
+}
 
-      if (
-        hours >= 12 &&
-        next.city !== BASE_AIRPORT
-      ) {
-        stays.push({
-          city: next.city, // cidade do pernoite = onde começa o dia seguinte
-          check_in: current.date.toISOString(),
-          check_out: next.date.toISOString(),
-          user_email,
-        });
-      }
-    }
+const days = Object.keys(eventsByDay).sort();
+
+for (let i = 0; i < days.length - 1; i++) {
+  const today = days[i];
+  const tomorrow = days[i + 1];
+
+  const todayEvents = eventsByDay[today];
+  const tomorrowEvents = eventsByDay[tomorrow];
+
+  const lastToday = todayEvents[todayEvents.length - 1];
+  const firstTomorrow = tomorrowEvents[0];
+
+  // regra 1: cidades devem ser iguais
+  if (lastToday.city !== firstTomorrow.city) continue;
+
+  // regra 2: não pode ser base
+  if (lastToday.city === BASE_AIRPORT) continue;
+
+  // regra 3: descanso mínimo 12h
+  const hours = diffHours(lastToday.date, firstTomorrow.date);
+  if (hours < 12) continue;
+
+  stays.push({
+    city: lastToday.city,
+    check_in: lastToday.date.toISOString(),
+    check_out: firstTomorrow.date.toISOString(),
+    user_email,
+  });
+}
 
     console.log(`🛏️ ${stays.length} pernoites calculados`);
 
