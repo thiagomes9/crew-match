@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
+/* =========================
+   CLIENTS
+========================= */
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -11,16 +14,22 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+/* =========================
+   CONFIG
+========================= */
 const VALID_AIRPORTS = [
   "GRU","CGH","VCP","GIG","BSB","CNF","SSA","REC","AJU",
   "FOR","BEL","POA","CWB","FLN","NAT","MCZ","SLZ",
-  "JPA","THE","PMW","RAO","UDI","IOS","VIX","LEC","RO2","CPV"
+  "JPA","THE","PMW","RAO","UDI","IOS","VIX",
+  "IPN","MOC" // adicionados
 ];
 
+/* =========================
+   HELPERS
+========================= */
 function safeJsonParse(text) {
   try {
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
+    return JSON.parse(text.replace(/```json|```/g, "").trim());
   } catch {
     return null;
   }
@@ -30,6 +39,14 @@ function diffHours(a, b) {
   return (b - a) / 1000 / 60 / 60;
 }
 
+function normalizeCity(city) {
+  if (!city) return null;
+  return city.trim().toUpperCase();
+}
+
+/* =========================
+   ROUTE
+========================= */
 export async function POST(req) {
   try {
     const { raw_text, user_email } = await req.json();
@@ -41,10 +58,8 @@ export async function POST(req) {
       );
     }
 
-    console.log("📄 Processando escala de:", user_email);
-
     /* =========================
-       BUSCAR BASE DO USUÁRIO
+       BUSCA BASE DO USUÁRIO
     ========================= */
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
@@ -53,7 +68,6 @@ export async function POST(req) {
       .single();
 
     if (profileError || !profile?.base) {
-      console.error("❌ Base não encontrada");
       return NextResponse.json(
         { error: "Base do usuário não definida" },
         { status: 400 }
@@ -64,23 +78,41 @@ export async function POST(req) {
     console.log("🏠 Base do usuário:", BASE_AIRPORT);
 
     /* =========================
-       OPENAI — EXTRAIR EVENTOS
+       OPENAI — EXTRAI EVENTOS
     ========================= */
     const prompt = `
-Você receberá uma escala de voo.
+Você é um analista técnico de escalas aéreas brasileiras.
 
-Extraia eventos de INÍCIO e FIM de jornada.
+A partir do texto abaixo, extraia TODOS os eventos operacionais
+que possuam DATA, HORA e CIDADE.
 
-Retorne SOMENTE JSON válido:
+Considere como eventos:
+- apresentação
+- início de jornada
+- fim de jornada
+- término de etapa
+- chegada
+- saída
+- qualquer evento com data + hora + aeroporto
+
+Para cada evento, retorne:
+- datetime: YYYY-MM-DDTHH:MM
+- city: código IATA (3 letras)
+- label: descrição curta do evento
+
+NÃO calcule descanso.
+NÃO interprete pernoite.
+NÃO filtre nada.
+
+Retorne APENAS JSON válido:
 
 [
-  { "type": "start" ou "end", "datetime": "YYYY-MM-DDTHH:MM", "city": "XXX" }
+  {
+    "datetime": "YYYY-MM-DDTHH:MM",
+    "city": "XXX",
+    "label": "texto"
+  }
 ]
-
-Regras:
-- Use sempre formato ISO.
-- Cidade deve ser código IATA (3 letras).
-- Não explique nada.
 
 Texto:
 """
@@ -97,35 +129,36 @@ ${raw_text}
     const aiText = completion.choices[0]?.message?.content || "";
     const events = safeJsonParse(aiText);
 
-    if (!Array.isArray(events)) {
-      console.error("❌ JSON inválido da OpenAI:", aiText);
-      return NextResponse.json(
-        { error: "Resposta inválida da IA" },
-        { status: 500 }
-      );
+    console.log("🧠 Eventos brutos da IA:", events);
+
+    if (!Array.isArray(events) || events.length < 2) {
+      return NextResponse.json({
+        message: "Eventos insuficientes",
+      });
     }
 
     /* =========================
-       NORMALIZAR E ORDENAR
+       NORMALIZA + ORDENA
     ========================= */
     const ordered = events
       .map((e) => ({
         ...e,
-        city: e.city?.trim().toUpperCase(),
+        city: normalizeCity(e.city),
         date: new Date(e.datetime),
       }))
       .filter(
         (e) =>
-          e.type &&
           !isNaN(e.date) &&
+          e.city &&
           VALID_AIRPORTS.includes(e.city)
       )
       .sort((a, b) => a.date - b.date);
 
-    console.log("📊 Eventos identificados:", ordered.length);
+    console.log("📍 Eventos válidos:", ordered);
 
     /* =========================
-       GERAR PERNOITES
+       CALCULA PERNOITES (≥12h)
+       REGRA: cidade = 1º evento do dia seguinte
     ========================= */
     const stays = [];
 
@@ -133,40 +166,36 @@ ${raw_text}
       const current = ordered[i];
       const next = ordered[i + 1];
 
-      if (current.type === "end" && next.type === "start") {
-        const hours = diffHours(current.date, next.date);
+      const hours = diffHours(current.date, next.date);
 
-        if (
-          hours >= 12 &&
-          current.city !== BASE_AIRPORT
-        ) {
-          stays.push({
-            city: current.city,
-            check_in: current.date.toISOString(),
-            check_out: next.date.toISOString(),
-            user_email,
-          });
-        }
+      if (
+        hours >= 12 &&
+        next.city !== BASE_AIRPORT
+      ) {
+        stays.push({
+          city: next.city, // cidade do pernoite = onde começa o dia seguinte
+          check_in: current.date.toISOString(),
+          check_out: next.date.toISOString(),
+          user_email,
+        });
       }
     }
 
-    console.log("🏨 Pernoites operacionais identificados:", stays.length);
+    console.log(`🛏️ ${stays.length} pernoites calculados`);
 
     if (!stays.length) {
       return NextResponse.json({
-        message: "Nenhum pernoite fora da base identificado",
+        message: "Nenhum pernoite operacional identificado",
       });
     }
 
     /* =========================
-       INSERIR NO SUPABASE
+       INSERT STAYS
     ========================= */
-    const { error } = await supabase
-      .from("stays")
-      .insert(stays);
+    const { error } = await supabase.from("stays").insert(stays);
 
     if (error) {
-      console.error("❌ Erro ao inserir stays:", error);
+      console.error("❌ staysError:", error);
       return NextResponse.json(
         { error: "Erro ao inserir pernoites" },
         { status: 500 }
@@ -178,7 +207,7 @@ ${raw_text}
     });
 
   } catch (err) {
-    console.error("❌ ERRO GERAL:", err);
+    console.error("❌ process-scale error:", err);
     return NextResponse.json(
       { error: "Erro interno" },
       { status: 500 }
