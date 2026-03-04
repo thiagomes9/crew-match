@@ -15,7 +15,7 @@ export default function Home() {
       const pdfjsLib = await import("pdfjs-dist/build/pdf");
 
       pdfjsLib.GlobalWorkerOptions.workerSrc =
-        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.624/pdf.worker.min.js";
 
       const arrayBuffer = await file.arrayBuffer();
 
