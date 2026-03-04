@@ -2,11 +2,8 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-/* =========================
-   CLIENTS
-========================= */
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY
 });
 
 const supabase = createClient(
@@ -14,225 +11,185 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-/* =========================
-   CONFIG
-========================= */
-const VALID_AIRPORTS = [
-  "GRU","CGH","VCP","GIG","BSB","CNF","SSA","REC","AJU",
-  "FOR","BEL","POA","CWB","FLN","NAT","MCZ","SLZ",
-  "JPA","THE","PMW","RAO","UDI","IOS","VIX",
-  "IPN","MOC" // adicionados
-];
-
-/* =========================
-   HELPERS
-========================= */
-function safeJsonParse(text) {
-  try {
-    return JSON.parse(text.replace(/```json|```/g, "").trim());
-  } catch {
-    return null;
-  }
-}
-
-function diffHours(a, b) {
-  return (b - a) / 1000 / 60 / 60;
-}
-
-function normalizeCity(city) {
-  if (!city) return null;
-  return city.trim().toUpperCase();
-}
-
-/* =========================
-   ROUTE
-========================= */
 export async function POST(req) {
   try {
-    const { raw_text, user_email } = await req.json();
+    console.log("🔥 process-scale EXECUTADO");
 
-    if (!raw_text || !user_email) {
-      return NextResponse.json(
-        { error: "raw_text ou user_email ausente" },
-        { status: 400 }
-      );
+    const body = await req.json();
+    const { text, user_email } = body;
+
+    if (!text) {
+      return NextResponse.json({ error: "Texto da escala ausente" }, { status: 400 });
     }
 
-    /* =========================
-       BUSCA BASE DO USUÁRIO
-    ========================= */
-    const { data: profile, error: profileError } = await supabase
+    if (!user_email) {
+      return NextResponse.json({ error: "Usuário não informado" }, { status: 400 });
+    }
+
+    /*
+    ==========================================
+    BUSCAR BASE DO USUÁRIO
+    ==========================================
+    */
+
+    const { data: profile } = await supabase
       .from("profiles")
       .select("base")
       .eq("email", user_email)
       .single();
 
-    if (profileError || !profile?.base) {
-      return NextResponse.json(
-        { error: "Base do usuário não definida" },
-        { status: 400 }
-      );
-    }
+    const userBase = profile?.base;
 
-    const BASE_AIRPORT = profile.base.trim().toUpperCase();
-    console.log("🏠 Base do usuário:", BASE_AIRPORT);
+    console.log("🏠 Base do usuário:", userBase);
 
-    /* =========================
-       OPENAI — EXTRAI EVENTOS
-    ========================= */
-    const prompt = `
-Você é um analista técnico de escalas aéreas brasileiras.
-
-A partir do texto abaixo, extraia TODOS os eventos operacionais
-que possuam DATA, HORA e CIDADE.
-
-Considere como eventos:
-- apresentação
-- início de jornada
-- fim de jornada
-- término de etapa
-- chegada
-- saída
-- qualquer evento com data + hora + aeroporto
-
-Para cada evento, retorne:
-- datetime: YYYY-MM-DDTHH:MM
-- city: código IATA (3 letras)
-- label: descrição curta do evento
-
-NÃO calcule descanso.
-NÃO interprete pernoite.
-NÃO filtre nada.
-
-Retorne APENAS JSON válido:
-
-[
-  {
-    "datetime": "YYYY-MM-DDTHH:MM",
-    "city": "XXX",
-    "label": "texto"
-  }
-]
-
-Texto:
-"""
-${raw_text}
-"""
-`;
+    /*
+    ==========================================
+    EXTRAIR EVENTOS DA ESCALA COM IA
+    ==========================================
+    */
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      messages: [{ role: "user", content: prompt }],
+      messages: [
+        {
+          role: "system",
+          content: `
+Você é um especialista em escalas de tripulação aérea.
+
+Extraia TODOS os eventos operacionais da escala.
+
+Cada evento deve conter:
+
+- date (ISO)
+- city (código ICAO ou IATA)
+- label (tipo do evento: voo, apresentação, corte, etc)
+
+Responda APENAS em JSON no formato:
+
+[
+  {
+    "date": "2026-03-01T05:00",
+    "city": "REC",
+    "label": "apresentacao"
+  }
+]
+`
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ]
     });
 
-    const aiText = completion.choices[0]?.message?.content || "";
-    const events = safeJsonParse(aiText);
+    let events;
 
-    console.log("🧠 EVENTOS ORDENADOS:");
-ordered.forEach(e => {
-  console.log(e.date.toISOString(), e.city, e.label);
-});
-
-    if (!Array.isArray(events) || events.length < 2) {
-      return NextResponse.json({
-        message: "Eventos insuficientes",
-      });
+    try {
+      events = JSON.parse(completion.choices[0].message.content);
+    } catch (err) {
+      console.error("❌ JSON inválido da OpenAI:", completion.choices[0].message.content);
+      return NextResponse.json({ error: "JSON inválido da IA" }, { status: 500 });
     }
 
-    /* =========================
-       NORMALIZA + ORDENA
-    ========================= */
+    if (!events || !Array.isArray(events)) {
+      return NextResponse.json({ error: "IA não retornou eventos válidos" }, { status: 500 });
+    }
+
+    /*
+    ==========================================
+    ORDENAR EVENTOS
+    ==========================================
+    */
+
     const ordered = events
-      .map((e) => ({
+      .map(e => ({
         ...e,
-        city: normalizeCity(e.city),
-        date: new Date(e.datetime),
+        date: new Date(e.date)
       }))
-      .filter(
-        (e) =>
-          !isNaN(e.date) &&
-          e.city &&
-          VALID_AIRPORTS.includes(e.city)
-      )
       .sort((a, b) => a.date - b.date);
 
-    console.log("📍 Eventos válidos:", ordered);
+    console.log("🧠 EVENTOS ORDENADOS:");
 
-    /* =========================
-       CALCULA PERNOITES (≥12h)
-       REGRA: cidade = 1º evento do dia seguinte
-    ========================= */
-    const stays = [];
-
-
-// agrupa eventos por dia (YYYY-MM-DD)
-const eventsByDay = {};
-for (const ev of ordered) {
-  const day = ev.date.toISOString().slice(0, 10);
-  if (!eventsByDay[day]) eventsByDay[day] = [];
-  eventsByDay[day].push(ev);
-}
-
-const days = Object.keys(eventsByDay).sort();
-
-for (let i = 0; i < days.length - 1; i++) {
-  const today = days[i];
-  const tomorrow = days[i + 1];
-
-  const todayEvents = eventsByDay[today];
-  const tomorrowEvents = eventsByDay[tomorrow];
-
-  const lastToday = todayEvents[todayEvents.length - 1];
-  const firstTomorrow = tomorrowEvents[0];
-
-  // regra 1: cidades devem ser iguais
-  if (lastToday.city !== firstTomorrow.city) continue;
-
-  // regra 2: não pode ser base
-  if (lastToday.city === BASE_AIRPORT) continue;
-
-  // regra 3: descanso mínimo 12h
-  const hours = diffHours(lastToday.date, firstTomorrow.date);
-  if (hours < 12) continue;
-
-  stays.push({
-    city: lastToday.city,
-    check_in: lastToday.date.toISOString(),
-    check_out: firstTomorrow.date.toISOString(),
-    user_email,
-  });
-}
-
-    console.log(`🛏️ ${stays.length} pernoites calculados`);
-
-    if (!stays.length) {
-      return NextResponse.json({
-        message: "Nenhum pernoite operacional identificado",
-      });
-    }
-
-    /* =========================
-       INSERT STAYS
-    ========================= */
-    const { error } = await supabase.from("stays").insert(stays);
-
-    if (error) {
-      console.error("❌ staysError:", error);
-      return NextResponse.json(
-        { error: "Erro ao inserir pernoites" },
-        { status: 500 }
+    for (const ev of ordered) {
+      console.log(
+        ev.date.toISOString(),
+        ev.city,
+        ev.label || "-"
       );
     }
 
+    /*
+    ==========================================
+    DETECTAR PERNOITES OPERACIONAIS
+    ==========================================
+    */
+
+    const overnights = [];
+
+    for (let i = 0; i < ordered.length - 1; i++) {
+
+      const current = ordered[i];
+      const next = ordered[i + 1];
+
+      const diffHours =
+        (next.date.getTime() - current.date.getTime()) / 3600000;
+
+      if (
+        diffHours >= 12 &&
+        current.city &&
+        next.city &&
+        current.city === next.city &&
+        current.city !== userBase
+      ) {
+        overnights.push({
+          city: current.city,
+          check_in: current.date,
+          check_out: next.date
+        });
+      }
+    }
+
+    console.log("🛏️ Pernoites identificados:", overnights.length);
+
+    /*
+    ==========================================
+    SALVAR NO BANCO
+    ==========================================
+    */
+
+    for (const stay of overnights) {
+
+      const { data: existing } = await supabase
+        .from("stays")
+        .select("id")
+        .eq("city", stay.city)
+        .eq("user_email", user_email)
+        .eq("check_in", stay.check_in.toISOString());
+
+      if (existing && existing.length > 0) {
+        continue;
+      }
+
+      await supabase.from("stays").insert({
+        city: stay.city,
+        user_email,
+        check_in: stay.check_in,
+        check_out: stay.check_out
+      });
+    }
+
     return NextResponse.json({
-      inserted: stays.length,
+      success: true,
+      overnights: overnights.length
     });
 
   } catch (err) {
-    console.error("❌ process-scale error:", err);
+
+    console.error("process-scale error:", err);
+
     return NextResponse.json(
-      { error: "Erro interno" },
+      { error: "Erro ao processar escala" },
       { status: 500 }
     );
   }
