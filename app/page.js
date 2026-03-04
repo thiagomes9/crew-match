@@ -1,10 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import * as pdfjsLib from "pdfjs-dist/build/pdf";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
 export default function Home() {
 
@@ -15,6 +11,11 @@ export default function Home() {
   async function extractPdfText(file) {
 
     try {
+
+      const pdfjsLib = await import("pdfjs-dist/build/pdf");
+
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
       const arrayBuffer = await file.arrayBuffer();
 
@@ -144,23 +145,16 @@ export default function Home() {
       <p>Logado como: {userEmail}</p>
 
       <input
-
         type="file"
-
         accept="application/pdf"
-
         onChange={(e) => setFile(e.target.files[0])}
-
       />
 
       <br />
-
       <br />
 
       <button onClick={processScale}>
-
         Enviar escala
-
       </button>
 
     </main>
