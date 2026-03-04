@@ -14,12 +14,6 @@ export default function Home() {
 
       const pdfjsLib = await import("pdfjs-dist/build/pdf");
 
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        new URL(
-          "pdfjs-dist/build/pdf.worker.min.js",
-          import.meta.url
-        ).toString();
-
       const arrayBuffer = await file.arrayBuffer();
 
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -57,8 +51,11 @@ export default function Home() {
     formData.append("file", file);
 
     const res = await fetch("/api/ocr", {
+
       method: "POST",
+
       body: formData
+
     });
 
     const data = await res.json();
@@ -108,8 +105,10 @@ export default function Home() {
       },
 
       body: JSON.stringify({
+
         text: extractedText,
         user_email: userEmail
+
       })
 
     });
@@ -146,8 +145,7 @@ export default function Home() {
         onChange={(e) => setFile(e.target.files[0])}
       />
 
-      <br />
-      <br />
+      <br /><br />
 
       <button onClick={processScale}>
         Enviar escala
