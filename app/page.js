@@ -14,6 +14,9 @@ export default function Home() {
 
       const pdfjsLib = await import("pdfjs-dist/build/pdf");
 
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://unpkg.com/pdfjs-dist@5.4.624/build/pdf.worker.min.mjs";
+
       const arrayBuffer = await file.arrayBuffer();
 
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -51,11 +54,8 @@ export default function Home() {
     formData.append("file", file);
 
     const res = await fetch("/api/ocr", {
-
       method: "POST",
-
       body: formData
-
     });
 
     const data = await res.json();
