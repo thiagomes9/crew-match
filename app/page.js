@@ -15,7 +15,10 @@ export default function Home() {
       const pdfjsLib = await import("pdfjs-dist/build/pdf");
 
       pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.624/pdf.worker.min.js";
+        new URL(
+          "pdfjs-dist/build/pdf.worker.min.js",
+          import.meta.url
+        ).toString();
 
       const arrayBuffer = await file.arrayBuffer();
 
@@ -44,6 +47,7 @@ export default function Home() {
       return null;
 
     }
+
   }
 
   async function runOCR(file) {
@@ -53,11 +57,8 @@ export default function Home() {
     formData.append("file", file);
 
     const res = await fetch("/api/ocr", {
-
       method: "POST",
-
       body: formData
-
     });
 
     const data = await res.json();
@@ -103,17 +104,12 @@ export default function Home() {
       method: "POST",
 
       headers: {
-
         "Content-Type": "application/json"
-
       },
 
       body: JSON.stringify({
-
         text: extractedText,
-
         user_email: userEmail
-
       })
 
     });
